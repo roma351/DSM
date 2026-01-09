@@ -1,5 +1,4 @@
 from typing import Dict, List, Union, Literal
-
 from pydantic import BaseModel
 
 EntityKey = Dict[str, int | str]
@@ -16,3 +15,4 @@ class FilterClause(BaseModel):
 FilterExpr = Union[FilterValue, List[FilterValue], FilterClause]
 FilterGroup = Dict[str, FilterExpr]
 FilterGroups = List[FilterGroup]
+

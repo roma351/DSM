@@ -4,8 +4,8 @@ import traceback
 from fastapi import APIRouter, HTTPException, Depends, Request
 
 from app.state import state
-from app.models.request import SaveRequest, GetRequest, QueryRequest, HistoryRequest
-from app.models.response import SaveResponse, QueryResponse, HistoryResponse
+from app.models.request import SaveRequest, GetRequest, QueryRequest, HistoryRequest, GroupRequest
+from app.models.response import SaveResponse, QueryResponse, HistoryResponse, GroupResponse
 from app.services.read_service import ReadService
 from app.services.write_service import WriteService
 
@@ -51,7 +51,7 @@ async def query_endpoint(req: QueryRequest) -> QueryResponse:
     try:
         records, total = await ReadService.query(
             req.table, req.fields, req.filters,
-            req.limit, req.offset, req.sort
+            req.limit, req.offset, req.sort_by
         )
     except Exception as e:
         logging.error(e, exc_info=True)
@@ -65,13 +65,28 @@ async def history_endpoint(req: HistoryRequest) -> HistoryResponse:
     try:
         history, total = await ReadService.get_history(
             req.table, req.fields, req.filters,
-            req.limit, req.offset, req.sort
+            req.limit, req.offset, req.sort_by
         )
     except Exception as e:
         logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
     return HistoryResponse(history=history, count=len(history), total=total)
+
+
+@router.post("/read/group")
+async def group_endpoint(req: GroupRequest) -> GroupResponse:
+    try:
+        results, total = await ReadService.get_grouped(
+            req.table, req.is_history, req.filters,
+            req.group_by, req.aggs, req.having,
+            req.limit, req.offset, req.sort_by
+        )
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return GroupResponse(results=results, count=len(results), total=total)
 
 
 @router.get("/config/tables")

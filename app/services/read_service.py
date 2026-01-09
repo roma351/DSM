@@ -2,6 +2,8 @@ from typing import Optional, Tuple, List, Dict
 
 from app.db.table_binding import TableBinding
 from app.db.table_schema import TableSchema
+from app.models.agg_types import Aggregates
+from app.models.query_types import SortBy
 from app.state import state
 from app.db.pools import Pools
 from app.utils.entity import normalize_entity, EntityDict
@@ -36,7 +38,7 @@ class ReadService:
         filters: FilterGroups,
         limit: int = 100,
         offset: int = 0,
-        sort: str = "desc"
+        sort: SortBy = None
     ) -> Tuple[List[dict], int]:
         table_binding: TableBinding = state.TABLES_CONFIG[table]
         schema: TableSchema = table_binding.schema
@@ -54,7 +56,7 @@ class ReadService:
         filters: FilterGroups,
         limit: int = 100,
         offset: int = 0,
-        sort: str = "desc"
+        sort_by: SortBy = None
     ) -> Tuple[List[dict], int]:
         table_binding: TableBinding = state.TABLES_CONFIG[table]
         schema: TableSchema = table_binding.schema
@@ -63,4 +65,29 @@ class ReadService:
             return [], 0
 
         pool = Pools.get_pool(table_binding.history_database)
-        return await pool.get_records(schema, fields, filters, True, limit, offset, sort)
+        return await pool.get_records(schema, fields, filters, True, limit, offset, sort_by)
+
+    @staticmethod
+    async def get_grouped(
+            table: str,
+            is_history: bool,
+            filters: FilterGroups,
+            group_by: List[str],
+            aggs: Aggregates,
+            having: FilterGroups,
+            limit: int = 100,
+            offset: int = 0,
+            sort_by: SortBy = None,
+    ) -> Tuple[List[dict], int]:
+        table_binding: TableBinding = state.TABLES_CONFIG[table]
+        schema: TableSchema = table_binding.schema
+
+        if (not table_binding.has_current()) and (not is_history):
+            raise ValueError("table doesn't have current")
+        if (not table_binding.has_history()) and is_history:
+            raise ValueError("table doesn't have history")
+
+        db_key = table_binding.history_database if is_history else table_binding.database
+        pool = Pools.get_pool(db_key)
+
+        return await pool.get_group(schema, is_history, filters, group_by, aggs, having, limit, offset, sort_by)

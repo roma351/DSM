@@ -478,9 +478,10 @@ TODO `/admin?set_admin=1`
 
 ```text
 ————————————————————————————————————————————————————
-1. в Group и History добавить group = ["client_id", "command_type"] (GROUP BY) и sort_by = "created_at/updated_at"
-4. генератор файлов (python, golang) (tg_users_write()) (tg_users_query())...
-
+-. в Query и History добавить group = ["client_id", "command_type"] (GROUP BY) и sort_by = "created_at/updated_at" + визуализация и графики
+1. только по Query 2. только по History
+-. генератор файлов (python, golang) (tg_users_write()) (tg_users_query())...
+- проверку ключа переделать и проверку для него прав и таблиц
 ————————————————————————————————————————————————————
 ————————————————————————————————————————————————————
 

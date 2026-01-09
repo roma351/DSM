@@ -4,7 +4,9 @@ from abc import ABC, abstractmethod
 from typing import Optional, Callable, Tuple, List, Dict
 
 from app.db.table_schema import TableSchema
+from app.models.agg_types import Aggregates
 from app.models.filter_types import FilterGroups
+from app.models.query_types import SortBy
 
 # ============================================================================
 # DATABASE DRIVER
@@ -82,7 +84,23 @@ class DatabaseDriver(ABC):
         is_history: bool,
         limit: int = 100,
         offset: int = 0,
-        sort: str = "desc",
+        sort_by: SortBy = None,
+    ) -> Tuple[List[dict], int]:
+        """Close connection pool"""
+        pass
+
+    @abstractmethod
+    async def get_group(
+            self,
+            schema: TableSchema,
+            is_history: bool,
+            filters: FilterGroups,
+            group_by: List[str],
+            aggs: Aggregates,
+            having: FilterGroups,
+            limit: int = 100,
+            offset: int = 0,
+            sort_by: SortBy = None,
     ) -> Tuple[List[dict], int]:
         """Close connection pool"""
         pass

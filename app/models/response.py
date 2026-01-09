@@ -23,3 +23,9 @@ class HistoryResponse(BaseModel):
     history: list[dict]
     count: int
     total: int
+
+
+class GroupResponse(BaseModel):
+    results: list[dict]
+    count: int
+    total: int

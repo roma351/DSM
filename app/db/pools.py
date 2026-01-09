@@ -33,7 +33,7 @@ class Pools:
         cls.pools = {}
 
     @classmethod
-    def get_pool(cls, db_name: str = "default") -> DatabaseDriver:
-        if db_name not in cls.pools:
-            raise KeyError(f"DB pool '{db_name}' is not initialized")
-        return cls.pools[db_name]
+    def get_pool(cls, db_key: str = "default") -> DatabaseDriver:
+        if db_key not in cls.pools:
+            raise KeyError(f"DB pool '{db_key}' is not initialized")
+        return cls.pools[db_key]

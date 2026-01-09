@@ -11,9 +11,12 @@ from asynch.cursors import DictCursor
 from app.db.database import DatabaseDriver
 from app.db.table_schema import TableSchema, FieldConfig
 from app.db.field_types import FieldType
-from app.models.filter_types import FilterGroups
+from app.models.agg_types import Aggregates, AggOp
+from app.models.filter_types import FilterGroups, FilterClause
+from app.models.query_types import SortBy, SortItem
 from app.utils.conversion import convert_value
 from app.utils.hashing import compute_hash
+from app.utils.sql_ident import validate_sql_alias, validate_sql_col
 
 InsertMode = Literal["sparse", "schema"]
 EntityKey = Dict[str, int | str]
@@ -488,36 +491,175 @@ class ClickHouseDriver(DatabaseDriver):
             is_history: bool,
             limit: int = 100,
             offset: int = 0,
-            sort: str = "desc",
+            sort_by: SortBy = None,
     ) -> Tuple[List[dict], int]:
         table = self._db_table(schema, is_history=is_history)
 
-        where_sql, params = _build_filters_where_ch(schema, filters, is_history=is_history)
+        if not sort_by:
+            raise ValueError("sort_by is required")
 
-        all_cols = {f.name for f in schema.get_all_fields(is_history=is_history)}
+        select_sql = _build_select_fields_ch(schema, is_history=is_history, fields=fields or [])
+        where_sql, params = _build_where_ch_groups(schema, is_history=is_history, filters=filters, param_prefix="w")
+        where = f"WHERE {where_sql}" if where_sql else ""
 
-        if is_history:
-            order_col = "created_at" if "created_at" in all_cols else _entity_cols(schema)[0]
+        order_sql = _build_order_by_ch(schema, is_history=is_history, sort_by=sort_by)
+
+        if not is_history:
+            # current: dedup to last version per entity
+            by_key = ", ".join(f"`{c}`" for c in _entity_cols(schema))
+
+            count_sql = f"""
+                    SELECT count() AS cnt
+                    FROM (
+                        SELECT 1
+                        FROM {table}
+                        {where}
+                        {order_sql}
+                        LIMIT 1 BY {by_key}
+                    )
+                """
+
+            data_sql = f"""
+                    SELECT {select_sql}
+                    FROM (
+                        SELECT *
+                        FROM {table}
+                        {where}
+                        {order_sql}
+                        LIMIT 1 BY {by_key}
+                    )
+                    {order_sql}
+                    LIMIT {int(limit)} OFFSET {int(offset)}
+                """
         else:
-            order_col = "updated_at" if "updated_at" in all_cols else "created_at"
+            # history: plain scan
+            count_sql = f"SELECT count() AS cnt FROM {table} {where}"
+            data_sql = f"SELECT {select_sql} FROM {table} {where} {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
 
-        if not (sort.upper() in ["DESC", "ASC"]):
-            raise ValueError("Sort should be 'asc' or 'desc'")
+        logging.warning(f"CLICKHOUSE GET_RECORDS: {data_sql}")
 
-        order_sql = f"ORDER BY {order_col} {sort.upper()}"
+        async with self.pool.connection() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute(count_sql, params)
+                cnt_row = await cur.fetchone()
+                total = int((cnt_row or {}).get("cnt", 0))
 
-        select_sql = "*"
-        if fields:
-            all_fields = {f.name for f in schema.get_all_fields(is_history=is_history)}
-            unknown = [f for f in fields if f not in all_fields]
-            if unknown:
-                raise ValueError(f"Unknown fields requested: {unknown}")
-            select_sql = ", ".join(f"`{f}`" for f in fields)
+                await cur.execute(data_sql, params)
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows], total
 
-        count_sql = f"SELECT count() AS cnt FROM {table} {where_sql}"
-        data_sql = f"SELECT {select_sql} FROM {table} {where_sql} {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
+    async def get_group(
+            self,
+            schema: TableSchema,
+            is_history: bool,
+            filters: FilterGroups,
+            group_by: List[str],
+            aggs: Aggregates,
+            having: FilterGroups,
+            limit: int = 100,
+            offset: int = 0,
+            sort_by: SortBy = None,
+    ) -> Tuple[List[dict], int]:
+        table = self._db_table(schema, is_history=is_history)
 
-        # logging.warning(f"CLICKHOUSE GET_RECORDS: {data_sql}")
+        if not sort_by:
+            raise ValueError("sort_by is required")
+        if len(aggs) == 0:
+            raise ValueError("aggs is required")
+
+        allowed_cols = _all_schema_fields_ch(schema, is_history=is_history)
+        if not group_by:
+            raise ValueError("group_by is required")
+        for c in group_by:
+            if c not in allowed_cols:
+                raise ValueError(f"Unknown group_by field '{c}' for table '{schema.name}'")
+
+        aggs_sql, agg_aliases, agg_expr_map = _build_aggs_ch(schema, is_history, aggs)
+
+        output_allowed = set(group_by) | set(agg_aliases)
+
+        for s in sort_by:
+            if s.field not in output_allowed:
+                raise ValueError(f"Unknown sort_by field '{s.field}' (allowed: group_by + agg aliases)")
+
+        # SELECT: group_by + aggs
+        select_list = ", ".join(f"`{c}`" for c in group_by)
+        if aggs_sql:
+            select_list = (select_list + ", " if select_list else "") + aggs_sql
+
+        # WHERE
+        where_sql, params = _build_where_ch_groups(schema, is_history=is_history, filters=filters, param_prefix="w")
+        where = f"WHERE {where_sql}" if where_sql else ""
+
+        group_sql = "GROUP BY " + ", ".join(f"`{c}`" for c in group_by) if group_by else ""
+
+        # HAVING via expressions
+        having_expr = _build_having_ch(
+            having,
+            output_allowed=output_allowed,
+            agg_expr_map=agg_expr_map,
+            params=params,
+            param_prefix="h",
+        )
+        having_clause = f"HAVING {having_expr}" if having_expr else ""
+
+        order_sql = _build_order_by_ch(schema, is_history=is_history, sort_by=sort_by, allowed_extra=output_allowed)
+
+        if not is_history:
+            by_key = ", ".join(f"`{c}`" for c in _entity_cols(schema))
+
+            base = f"""
+                FROM (
+                    SELECT *
+                    FROM {table}
+                    {where}
+                    ORDER BY `updated_at` DESC
+                    LIMIT 1 BY {by_key}
+                ) src
+            """
+
+            count_sql = f"""
+                SELECT count() AS cnt
+                FROM (
+                    SELECT 1
+                    {base}
+                    {group_sql}
+                    {having_clause}
+                ) t
+            """
+
+            data_sql = f"""
+                SELECT {select_list}
+                {base}
+                {group_sql}
+                {having_clause}
+                {order_sql}
+                LIMIT {int(limit)} OFFSET {int(offset)}
+            """
+        else:
+            count_sql = f"""
+                SELECT count() AS cnt
+                FROM (
+                    SELECT 1
+                    FROM {table}
+                    {where}
+                    {group_sql}
+                    {having_clause}
+                ) t
+            """
+
+            data_sql = f"""
+                SELECT {select_list}
+                FROM {table}
+                {where}
+                {group_sql}
+                {having_clause}
+                {order_sql}
+                LIMIT {int(limit)} OFFSET {int(offset)}
+            """
+
+        logging.warning(f"CLICKHOUSE GET_GROUP: {data_sql}")
+        logging.warning(f"CLICKHOUSE GET_GROUP2: {count_sql}")
 
         async with self.pool.connection() as conn:
             async with conn.cursor(DictCursor) as cur:
@@ -721,3 +863,172 @@ def _build_filters_where_ch(
         return "", {}
 
     return "WHERE " + " OR ".join(or_parts), params
+
+
+def _all_schema_fields_ch(schema: TableSchema, is_history: bool) -> Dict[str, FieldConfig]:
+    return {f.name: f for f in schema.get_all_fields(is_history=is_history)}
+
+
+def _build_select_fields_ch(schema: TableSchema, is_history: bool, fields: List[str]) -> str:
+    if not fields:
+        return "*"
+    allowed = _all_schema_fields_ch(schema, is_history)
+    for c in fields:
+        if c not in allowed:
+            raise ValueError(f"Unknown field '{c}' for table '{schema.name}'")
+    return ", ".join(f"`{c}`" for c in fields)
+
+
+def _build_order_by_ch(schema: TableSchema, is_history: bool, sort_by: SortBy, allowed_extra: Optional[set[str]] = None) -> str:
+    allowed = set(_all_schema_fields_ch(schema, is_history).keys())
+    if allowed_extra:
+        allowed |= set(allowed_extra)
+
+    parts: List[str] = []
+    for s in sort_by:
+        if s.field not in allowed:
+            raise ValueError(f"Unknown sort field '{s.field}' for table '{schema.name}'")
+        d = "ASC" if s.dir == "asc" else "DESC"
+        parts.append(f"`{s.field}` {d}")
+
+    return "ORDER BY " + ", ".join(parts) if parts else ""
+
+
+def _build_where_ch_groups(schema: TableSchema, is_history: bool, filters: FilterGroups, *,
+                          param_prefix: str = "f") -> Tuple[str, Dict[str, Any]]:
+    allowed = _all_schema_fields_ch(schema, is_history)
+    params: Dict[str, Any] = {}
+    or_groups: List[str] = []
+    n = 0
+
+    for g in filters:
+        and_parts: List[str] = []
+        for name, clause in g.items():
+            if name not in allowed:
+                raise ValueError(f"Unknown filter field '{name}' for table '{schema.name}'")
+
+            if isinstance(clause, FilterClause):
+                op = clause.op
+                raw_val = clause.value
+            else:
+                op = "="
+                raw_val = clause
+
+            fcfg = allowed[name]
+            pname = f"{param_prefix}_{name}_{n}"
+            n += 1
+
+            if op == "in":
+                if not isinstance(raw_val, list):
+                    raise ValueError(f"Filter '{name}' with op=in must be a list")
+                and_parts.append(f"`{name}` IN {{{pname}}}")
+                params[pname] = tuple(_ch_value(convert_value(x, fcfg.type)) for x in raw_val)
+            else:
+                and_parts.append(f"`{name}` {op} {{{pname}}}")
+                params[pname] = _ch_value(convert_value(raw_val, fcfg.type))
+
+        or_groups.append("(" + " AND ".join(and_parts) + ")")
+
+    if not or_groups:
+        return "", params
+
+    return " OR ".join(or_groups), params
+
+
+# clickhouse.py (top-level)
+CH_CUSTOM_AGGS: dict[str, callable] = {
+    "uniqExact": lambda col: f"uniqExact({col})",
+    # при желании позже:
+    # "uniqCombined64": lambda col: f"uniqCombined64({col})",
+    # "sumIf": lambda col: f"sumIf({col}, ...)"  # но тут уже нужно расширять AggSpec (условие)
+}
+
+def _build_aggs_ch(schema, is_history: bool, aggs: Aggregates) -> Tuple[str, List[str], Dict[str, str]]:
+    parts: List[str] = []
+    aliases: List[str] = []
+    expr_map: Dict[str, str] = {}
+
+    allowed_cols = set(_all_schema_fields_ch(schema, is_history=is_history).keys())
+
+    for alias, spec in aggs.items():
+        alias = validate_sql_alias(alias)
+
+        if spec.op == AggOp.count:
+            expr = "count()" if not spec.field else f"count({validate_sql_col(spec.field)})"
+
+        elif spec.op == AggOp.uniq:
+            col = validate_sql_col(spec.field or "")
+            if col not in allowed_cols:
+                raise ValueError(f"Unknown aggregate field '{col}'")
+            expr = f"uniq({col})"
+
+        elif spec.op == AggOp.custom:
+            name = spec.custom_name or ""
+            fn = CH_CUSTOM_AGGS.get(name)
+            if not fn:
+                raise ValueError(f"Unsupported custom aggregate '{name}' for clickhouse")
+            if not spec.field:
+                raise ValueError(f"Custom aggregate '{name}' requires 'field'")
+            col = validate_sql_col(spec.field)
+            if col not in allowed_cols:
+                raise ValueError(f"Unknown aggregate field '{col}'")
+            expr = fn(col)
+
+        else:
+            col = validate_sql_col(spec.field or "")
+            if col not in allowed_cols:
+                raise ValueError(f"Unknown aggregate field '{col}'")
+            fn = spec.op.value
+            expr = f"{fn}({col})"
+
+        parts.append(f"{expr} AS `{alias}`")
+        aliases.append(alias)
+        expr_map[alias] = expr
+
+    return ", ".join(parts), aliases, expr_map
+
+
+def _build_having_ch(
+    having: FilterGroups,
+    *,
+    output_allowed: set[str],
+    agg_expr_map: Dict[str, str],
+    params: Dict[str, Any],
+    param_prefix: str,
+) -> str:
+    or_groups: List[str] = []
+    n = 0
+
+    for g in having:
+        and_parts: List[str] = []
+        for name, clause in g.items():
+            validate_sql_col(name)
+            if name not in output_allowed:
+                raise ValueError(f"Unknown having field '{name}' (allowed: group_by + agg aliases)")
+
+            if isinstance(clause, FilterClause):
+                op = clause.op
+                raw_val = clause.value
+            else:
+                op = "="
+                raw_val = clause
+
+            expr = agg_expr_map.get(name, f"`{name}`")
+
+            pname = f"{param_prefix}_{name}_{n}"
+            n += 1
+
+            if op == "in":
+                if not isinstance(raw_val, list):
+                    raise ValueError(f"Having '{name}' with op=in must be a list")
+                and_parts.append(f"{expr} IN {{{pname}}}")
+                params[pname] = tuple(raw_val)
+            else:
+                if op not in ("=", "!=", "<", "<=", ">", ">="):
+                    raise ValueError(f"Unsupported op '{op}'")
+                and_parts.append(f"{expr} {op} {{{pname}}}")
+                params[pname] = raw_val
+
+        or_groups.append("(" + " AND ".join(and_parts) + ")")
+
+    return (" OR ".join(or_groups)) if or_groups else ""

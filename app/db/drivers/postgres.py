@@ -9,9 +9,12 @@ import asyncpg
 from app.db.table_schema import TableSchema, FieldConfig
 from app.db.field_types import FieldType
 from app.db.database import DatabaseDriver
-from app.models.filter_types import FilterGroups
+from app.models.agg_types import Aggregates, AggOp
+from app.models.filter_types import FilterGroups, FilterClause
+from app.models.query_types import SortBy, SortItem
 from app.utils.conversion import convert_value
 from app.utils.hashing import compute_hash
+from app.utils.sql_ident import validate_sql_alias, validate_sql_col
 
 InsertMode = Literal["sparse", "schema"]
 EntityKey = Dict[str, int | str]
@@ -305,48 +308,110 @@ class PostgresDriver(DatabaseDriver):
             is_history: bool,
             limit: int = 100,
             offset: int = 0,
-            sort: str = "desc",
+            sort_by: SortBy = None,
     ) -> Tuple[List[dict], int]:
         table = f"{schema.name}{schema.history_prefix if is_history else schema.current_prefix}"
 
-        where_sql, where_vals, idx = _build_filters_where(
-            schema,
-            filters,
-            is_history=is_history,
-            start_idx=1,
-        )
+        if not sort_by:
+            raise ValueError("sort_by is required")
 
-        if is_history:
-            order_col = "created_at" if _has_column(schema, is_history=True, col="created_at") else \
-                schema.entity_fields[0].name
-        else:
-            if _has_column(schema, is_history=False, col="updated_at"):
-                order_col = "updated_at"
-            else:
-                order_col = "created_at"
+        select_sql = _build_select_fields_pg(schema, is_history=is_history, fields=fields or [])
+        where_sql, where_vals, next_idx = _build_where_pg(schema, is_history=is_history, filters=filters, start_idx=1)
+        where = f"WHERE {where_sql}" if where_sql else ""
 
-        if not (sort.upper() in ["DESC", "ASC"]):
-            raise ValueError("Sort should be 'asc' or 'desc'")
+        order_sql = _build_order_by_pg(schema, is_history=is_history, sort_by=sort_by)
 
-        order_sql = f"ORDER BY {order_col} {sort.upper()}"
+        count_sql = f"SELECT COUNT(*) FROM {table} {where}"
+        data_sql = f"SELECT {select_sql} FROM {table} {where} {order_sql} LIMIT ${next_idx} OFFSET ${next_idx + 1}"
+        vals_q = list(where_vals) + [limit, offset]
 
-        select_sql = "*"
-        if fields:
-            all_fields = {f.name for f in schema.get_all_fields(is_history=is_history)}
-            unknown = [f for f in fields if f not in all_fields]
-            if unknown:
-                raise ValueError(f"Unknown fields requested: {unknown}")
-            select_sql = ", ".join(fields)
-
-        count_sql = f"SELECT COUNT(*) FROM {table} {where_sql}"
-        data_sql = f"SELECT {select_sql} FROM {table} {where_sql} {order_sql} LIMIT ${idx} OFFSET ${idx + 1}"
-        data_vals = where_vals + [limit, offset]
-
-        # logging.warning(f"POSTGRES GET_RECORDS: {data_sql}")
+        logging.warning(f"POSTGRES GET_RECORDS: {data_sql}")
 
         async with self.pool.acquire() as conn:
             total = await conn.fetchval(count_sql, *where_vals)
-            rows = await conn.fetch(data_sql, *data_vals)
+            rows = await conn.fetch(data_sql, *vals_q)
+            return [dict(r) for r in rows], int(total)
+
+    async def get_group(
+            self,
+            schema: TableSchema,
+            is_history: bool,
+            filters: FilterGroups,
+            group_by: List[str],
+            aggs: Aggregates,
+            having: FilterGroups,
+            limit: int = 100,
+            offset: int = 0,
+            sort_by: SortBy = None,
+    ) -> Tuple[List[dict], int]:
+        table = f"{schema.name}{schema.history_prefix if is_history else schema.current_prefix}"
+
+        if not sort_by:
+            raise ValueError("sort_by is required")
+        if len(aggs) == 0:
+            raise ValueError("aggs is required")
+
+        allowed_cols = _all_schema_fields(schema, is_history)
+        if not group_by:
+            raise ValueError("group_by is required")
+        for c in group_by:
+            if c not in allowed_cols:
+                raise ValueError(f"Unknown group_by field '{c}' for table '{schema.name}'")
+
+        aggs_sql, agg_aliases, agg_expr_map = _build_aggs_pg(schema, is_history, aggs)
+
+        output_allowed = set(group_by) | set(agg_aliases)
+
+        for s in sort_by:
+            if s.field not in output_allowed:
+                raise ValueError(f"Unknown sort_by field '{s.field}' (allowed: group_by + agg aliases)")
+
+        select_list = ", ".join(group_by) + (", " if group_by else "") + aggs_sql
+
+        where_sql, where_vals, idx = _build_where_pg(schema, is_history, filters, start_idx=1)
+
+        having_sql, having_vals, idx = _build_having_pg(
+            having,
+            output_allowed=output_allowed,
+            agg_expr_map=agg_expr_map,
+            start_idx=idx,
+        )
+
+        where = f"WHERE {where_sql}" if where_sql else ""
+        group_sql = "GROUP BY " + ", ".join(group_by) if group_by else ""
+        having_clause = f"HAVING {having_sql}" if having_sql else ""
+
+        order_sql = _build_order_by_pg(schema, is_history=is_history, sort_by=sort_by, allowed_extra=output_allowed)
+
+        count_sql = f"""
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM {table}
+                {where}
+                {group_sql}
+                {having_clause}
+            ) t
+        """
+
+        data_sql = f"""
+            SELECT {select_list}
+            FROM {table}
+            {where}
+            {group_sql}
+            {having_clause}
+            {order_sql}
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """
+
+        vals_all = list(where_vals) + list(having_vals)
+        vals_q = vals_all + [limit, offset]
+
+        logging.warning(f"POSTGRES GET_GROUP: {data_sql}")
+        logging.warning(f"POSTGRES GET_GROUP2: {count_sql}")
+
+        async with self.pool.acquire() as conn:
+            total = await conn.fetchval(count_sql, *vals_all)
+            rows = await conn.fetch(data_sql, *vals_q)
             return [dict(r) for r in rows], int(total)
 
     async def create_table(self, schema: TableSchema, is_history: bool = False) -> None:
@@ -547,22 +612,6 @@ def _jsonify(val: Any) -> Any:
     return json.dumps(val) if isinstance(val, dict) else val
 
 
-# --- ADD ---
-def _allowed_fields(schema: TableSchema, is_history: bool) -> Dict[str, FieldConfig]:
-    fields = list(schema.entity_fields) + list(schema.search_fields) + list(schema.data_fields)
-    # meta fields can be filtered too (history/query windows rely on them)
-    for f in schema.get_all_fields(is_history=is_history):
-        if f.name in ("created_at", "updated_at", "archived_at", "data_hash",
-                      schema.field_used_count_name, schema.field_change_count_name):
-            fields.append(f)
-
-    out: Dict[str, FieldConfig] = {}
-    for f in fields:
-        out[f.name] = f
-    return out
-
-
-# --- ADD ---
 def _normalize_filter_expr(expr: Any) -> Tuple[str, Any]:
     # expr already normalized by pydantic usually, but keep driver robust
     if isinstance(expr, (int, str)):
@@ -581,57 +630,190 @@ def _normalize_filter_expr(expr: Any) -> Tuple[str, Any]:
     raise ValueError("Invalid filter expression")
 
 
-# --- ADD ---
-def _build_filters_where(
-    schema: TableSchema,
-    filters: FilterGroups,
-    *,
-    is_history: bool,
-    start_idx: int = 1,
-) -> Tuple[str, List[Any], int]:
-    """
-    FilterGroups:
-      [
-        {"name": {"op": "=", "value": "123"}, "up": 1},
-        {"name": "456"}
-      ]
-    => (name='123' AND up=1) OR (name='456')
-    """
-    allowed = _allowed_fields(schema, is_history=is_history)
+def _all_schema_fields(schema: TableSchema, is_history: bool) -> Dict[str, FieldConfig]:
+    return {f.name: f for f in schema.get_all_fields(is_history=is_history)}
 
-    or_parts: List[str] = []
+
+def _build_select_fields_pg(schema: TableSchema, is_history: bool, fields: List[str]) -> str:
+    if not fields:
+        return "*"
+
+    allowed = _all_schema_fields(schema, is_history)
+    for c in fields:
+        if c not in allowed:
+            raise ValueError(f"Unknown field '{c}' for table '{schema.name}'")
+    return ", ".join(fields)
+
+
+def _build_order_by_pg(schema: TableSchema, is_history: bool, sort_by: SortBy, allowed_extra: Optional[set[str]] = None) -> str:
+    allowed = set(_all_schema_fields(schema, is_history).keys())
+    if allowed_extra:
+        allowed |= set(allowed_extra)
+
+    parts: List[str] = []
+    for s in sort_by:
+        if s.field not in allowed:
+            raise ValueError(f"Unknown sort field '{s.field}' for table '{schema.name}'")
+        d = "ASC" if s.dir == "asc" else "DESC"
+        parts.append(f"{s.field} {d}")
+
+    return "ORDER BY " + ", ".join(parts) if parts else ""
+
+
+def _pg_op(op: str) -> str:
+    if op in ("=", "!=", "<", "<=", ">", ">="):
+        return op
+    if op == "in":
+        return "IN"
+    raise ValueError(f"Unsupported filter op: {op}")
+
+
+def _build_where_pg(schema: TableSchema, is_history: bool, filters: FilterGroups, *, start_idx: int = 1,
+                    allowed_fields: Optional[Dict[str, FieldConfig]] = None) -> Tuple[str, List[Any], int]:
+    """
+    groups: OR between groups, AND inside a group
+    Returns: (sql_without_where_keyword_or_empty, values, next_idx)
+    """
     values: List[Any] = []
     idx = start_idx
 
-    for group in filters:
+    if allowed_fields is None:
+        allowed_fields = _all_schema_fields(schema, is_history)
+
+    or_groups: List[str] = []
+    for g in filters:
         and_parts: List[str] = []
+        for name, clause in g.items():
+            if name not in allowed_fields:
+                raise ValueError(f"Unknown filter field '{name}' for table '{schema.name}'")
 
-        for col, expr in group.items():
-            fcfg = allowed.get(col)
-            if not fcfg:
-                continue  # unknown fields are ignored (like your old logic)
+            if isinstance(clause, FilterClause):
+                op = clause.op
+                raw_val = clause.value
+            else:
+                # normalize_filters should have converted everything to FilterClause, but keep safe
+                op = "="
+                raw_val = clause
 
-            op, val = _normalize_filter_expr(expr)
+            fcfg = allowed_fields[name]
+            sql_op = _pg_op(op)
 
             if op == "in":
-                if not isinstance(val, list):
-                    raise ValueError(f"Filter '{col}' expects list for op 'in'")
-                and_parts.append(f"{col} = ANY(${idx})")
-                values.append([convert_value(v, fcfg.type) for v in val])
+                if not isinstance(raw_val, list):
+                    raise ValueError(f"Filter '{name}' with op=in must be a list")
+                and_parts.append(f"{name} = ANY(${idx})")
+                values.append([convert_value(x, fcfg.type) for x in raw_val])
                 idx += 1
-                continue
+            else:
+                and_parts.append(f"{name} {sql_op} ${idx}")
+                values.append(convert_value(raw_val, fcfg.type))
+                idx += 1
 
-            if op not in ("=", "!=", "<", "<=", ">", ">="):
-                raise ValueError(f"Unsupported filter op: {op}")
+        or_groups.append("(" + " AND ".join(and_parts) + ")")
 
-            and_parts.append(f"{col} {op} ${idx}")
-            values.append(convert_value(val, fcfg.type))
-            idx += 1
+    if not or_groups:
+        return "", values, idx
 
-        if and_parts:
-            or_parts.append("(" + " AND ".join(and_parts) + ")")
+    return " OR ".join(or_groups), values, idx
 
-    if not or_parts:
-        return "", [], idx
 
-    return "WHERE " + " OR ".join(or_parts), values, idx
+# postgres.py (top-level)
+PG_CUSTOM_AGGS: dict[str, callable] = {
+    # пример (если когда-нибудь понадобится):
+    # "approx_count_distinct": lambda col: f"approx_count_distinct({col})",
+}
+
+def _build_aggs_pg(schema, is_history: bool, aggs: Aggregates) -> Tuple[str, List[str], Dict[str, str]]:
+    parts: List[str] = []
+    aliases: List[str] = []
+    expr_map: Dict[str, str] = {}
+
+    allowed_cols = set(_all_schema_fields(schema, is_history).keys())
+
+    for alias, spec in aggs.items():
+        alias = validate_sql_alias(alias)
+
+        if spec.op == AggOp.count:
+            expr = "COUNT(*)" if not spec.field else f"COUNT({validate_sql_col(spec.field)})"
+
+        elif spec.op == AggOp.uniq:
+            col = validate_sql_col(spec.field or "")
+            if col not in allowed_cols:
+                raise ValueError(f"Unknown aggregate field '{col}'")
+            expr = f"COUNT(DISTINCT {col})"
+
+        elif spec.op == AggOp.custom:
+            name = spec.custom_name or ""
+            # pydantic уже regex проверил, но whitelist — здесь
+            fn = PG_CUSTOM_AGGS.get(name)
+            if not fn:
+                raise ValueError(f"Unsupported custom aggregate '{name}' for postgres")
+            # обычно кастомным тоже нужен field (но решай сам):
+            if not spec.field:
+                raise ValueError(f"Custom aggregate '{name}' requires 'field'")
+            col = validate_sql_col(spec.field)
+            if col not in allowed_cols:
+                raise ValueError(f"Unknown aggregate field '{col}'")
+            expr = fn(col)
+
+        else:
+            col = validate_sql_col(spec.field or "")
+            if col not in allowed_cols:
+                raise ValueError(f"Unknown aggregate field '{col}'")
+            fn = spec.op.value.upper()
+            expr = f"{fn}({col})"
+
+        parts.append(f"{expr} AS {alias}")
+        aliases.append(alias)
+        expr_map[alias] = expr
+
+    return ", ".join(parts), aliases, expr_map
+
+
+def _build_having_pg(
+    having: FilterGroups,
+    *,
+    output_allowed: set[str],
+    agg_expr_map: Dict[str, str],
+    start_idx: int,
+) -> Tuple[str, List[Any], int]:
+    values: List[Any] = []
+    idx = start_idx
+    or_groups: List[str] = []
+
+    for g in having:
+        and_parts: List[str] = []
+        for name, clause in g.items():
+            validate_sql_col(name)
+            if name not in output_allowed:
+                raise ValueError(f"Unknown having field '{name}' (allowed: group_by + agg aliases)")
+
+            if isinstance(clause, FilterClause):
+                op = clause.op
+                raw_val = clause.value
+            else:
+                op = "="
+                raw_val = clause
+
+            sql_op = _pg_op(op)
+
+            # expression: either group field name or agg expression
+            expr = agg_expr_map.get(name, name)
+
+            if op == "in":
+                if not isinstance(raw_val, list):
+                    raise ValueError(f"Having '{name}' with op=in must be a list")
+                and_parts.append(f"{expr} = ANY(${idx})")
+                values.append(list(raw_val))
+                idx += 1
+            else:
+                and_parts.append(f"{expr} {sql_op} ${idx}")
+                values.append(raw_val)
+                idx += 1
+
+        or_groups.append("(" + " AND ".join(and_parts) + ")")
+
+    if not or_groups:
+        return "", values, idx
+
+    return (" OR ".join(or_groups)), values, idx

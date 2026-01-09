@@ -1,11 +1,5 @@
 from typing import Optional, Union
-
-from app.models.filter_types import (
-    EntityKey,
-    FilterClause,
-    FilterGroup,
-    FilterGroups,
-)
+from app.models.filter_types import EntityKey, FilterClause, FilterGroup, FilterGroups
 
 
 def normalize_entity(entity: Optional[EntityKey], entity_id: Optional[str]) -> EntityKey:
@@ -25,10 +19,9 @@ def normalize_entity(entity: Optional[EntityKey], entity_id: Optional[str]) -> E
 
 
 def normalize_filters(filters: Union[FilterGroups, FilterGroup, None]) -> FilterGroups:
-    if filters is None or filters == {} or filters == []:
+    if filters is None:
         return []
-
-    if isinstance(filters, dict):
+    elif isinstance(filters, dict):
         groups = [filters]
     else:
         groups = list(filters)
@@ -42,26 +35,18 @@ def normalize_filters(filters: Union[FilterGroups, FilterGroup, None]) -> Filter
         for name, expr in g.items():
             if isinstance(expr, FilterClause):
                 ng[name] = expr
-                continue
-
-            if isinstance(expr, (str, int)):
+            elif isinstance(expr, (str, int)):
                 ng[name] = FilterClause(op="=", value=expr)
-                continue
-
-            if isinstance(expr, list):
+            elif isinstance(expr, list):
                 ng[name] = FilterClause(op="in", value=expr)
-                continue
-
-            if isinstance(expr, dict):
+            elif isinstance(expr, dict):
                 op = expr.get("op")
                 val = expr.get("value")
                 if op is None or val is None:
                     raise ValueError(f"Invalid filter for '{name}': expected {{op, value}}")
                 ng[name] = FilterClause(op=op, value=val)
-                continue
-
-            raise ValueError(f"Invalid filter value for '{name}'")
-
+            else:
+                raise ValueError(f"Invalid filter value for '{name}'")
         norm.append(ng)
 
     return norm
@@ -75,11 +60,7 @@ def add_filter_to_all_groups(groups: FilterGroups, name: str, clause: FilterClau
     return groups
 
 
-def apply_history_window(
-    groups: FilterGroups,
-    from_date: Optional[str],
-    to_date: Optional[str],
-) -> FilterGroups:
+def apply_history_window(groups: FilterGroups, from_date: Optional[str], to_date: Optional[str]) -> FilterGroups:
     if from_date and to_date:
         add_filter_to_all_groups(groups, "created_at", FilterClause(op="<=", value=to_date))
         add_filter_to_all_groups(groups, "archived_at", FilterClause(op=">=", value=from_date))
