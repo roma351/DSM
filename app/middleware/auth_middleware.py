@@ -1,4 +1,5 @@
 import json
+import logging
 import secrets
 from typing import Annotated
 
@@ -23,7 +24,12 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
         info = await self.verify_api_key(request)
         if info:
-            return await call_next(request)
+            try:
+                return await call_next(request)
+            # except HTTPException:
+            #     raise
+            except Exception as exc:
+                return self.global_exception(request, exc)
 
         return JSONResponse(
             status_code=403,
@@ -86,4 +92,18 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         return JSONResponse(
             status_code=403,
             content={"detail": "Forbidden"}
+        )
+
+    def global_exception(self, request: Request, exc: Exception):
+        logging.error(
+            f"Unhandled exception: {exc}",
+            exc_info=True,
+            extra={
+                "path": request.url.path,
+                "method": request.method,
+            }
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(exc)}
         )

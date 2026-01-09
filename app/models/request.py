@@ -3,6 +3,7 @@ from typing import Dict, Optional, Union, Literal, List
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.api.errors import ValidationError
 from app.models.agg_types import Aggregates, AggSpec, AggOp
 from app.models.agg_utils import normalize_aggs
 from app.models.filter_utils import (
@@ -68,8 +69,6 @@ class QueryRequest(BaseModel):
             self.filters = add_filter_to_all_groups(self.filters, "created_at", FilterClause(op="<=", value=self.at_date))
             self.filters = add_filter_to_all_groups(self.filters, "updated_at", FilterClause(op=">=", value=self.at_date))
 
-        print(self.sort_by)
-
         return self
 
 
@@ -94,7 +93,7 @@ class HistoryRequest(BaseModel):
             self.filters = add_filter_to_all_groups(self.filters, "entity_id", FilterClause(op="=", value=self.entity_id))
 
         if not self.sort_by:
-            self.sort_by = [SortItem(field="created_at", dir=self.sort)]
+            self.sort_by = [SortItem(field="archived_at", dir=self.sort)]
 
         self.filters = apply_history_window(self.filters, self.from_date, self.to_date)
 
@@ -104,8 +103,6 @@ class HistoryRequest(BaseModel):
             self.limit = 1000
         if self.offset < 0:
             self.offset = 0
-
-        print(self.sort_by)
 
         return self
 
@@ -133,7 +130,7 @@ class GroupRequest(BaseModel):
         self.aggs = normalize_aggs(self.aggs)
 
         if not self.group_by:
-            raise ValueError("group_by is required")
+            raise ValidationError("group_by is required")
 
         if not self.aggs:
             self.aggs = {"count": AggSpec(op=AggOp.count)}

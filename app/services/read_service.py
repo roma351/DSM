@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, List, Dict
 
+from app.api.errors import ValidationError
 from app.db.table_binding import TableBinding
 from app.db.table_schema import TableSchema
 from app.models.agg_types import Aggregates
@@ -20,7 +21,10 @@ class ReadService:
         table: str,
         entity: EntityDict,
     ) -> Optional[dict]:
-        table_binding: TableBinding = state.TABLES_CONFIG[table]
+        table_binding: TableBinding = state.TABLES_CONFIG.get(table)
+        if table_binding is None:
+            raise ValidationError("table not found")
+
         schema: TableSchema = table_binding.schema
 
         if not table_binding.has_current():
@@ -40,7 +44,10 @@ class ReadService:
         offset: int = 0,
         sort: SortBy = None
     ) -> Tuple[List[dict], int]:
-        table_binding: TableBinding = state.TABLES_CONFIG[table]
+        table_binding: TableBinding = state.TABLES_CONFIG.get(table)
+        if table_binding is None:
+            raise ValidationError("table not found")
+
         schema: TableSchema = table_binding.schema
 
         if not table_binding.has_current():
@@ -58,7 +65,10 @@ class ReadService:
         offset: int = 0,
         sort_by: SortBy = None
     ) -> Tuple[List[dict], int]:
-        table_binding: TableBinding = state.TABLES_CONFIG[table]
+        table_binding: TableBinding = state.TABLES_CONFIG.get(table)
+        if table_binding is None:
+            raise ValidationError("table not found")
+
         schema: TableSchema = table_binding.schema
 
         if not table_binding.has_history():
@@ -79,13 +89,16 @@ class ReadService:
             offset: int = 0,
             sort_by: SortBy = None,
     ) -> Tuple[List[dict], int]:
-        table_binding: TableBinding = state.TABLES_CONFIG[table]
+        table_binding: TableBinding = state.TABLES_CONFIG.get(table)
+        if table_binding is None:
+            raise ValidationError("table not found")
+
         schema: TableSchema = table_binding.schema
 
         if (not table_binding.has_current()) and (not is_history):
-            raise ValueError("table doesn't have current")
+            raise ValidationError("table doesn't have current")
         if (not table_binding.has_history()) and is_history:
-            raise ValueError("table doesn't have history")
+            raise ValidationError("table doesn't have history")
 
         db_key = table_binding.history_database if is_history else table_binding.database
         pool = Pools.get_pool(db_key)

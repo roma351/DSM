@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Optional, Dict, Callable
 
+from app.api.errors import ValidationError
 from app.db.table_binding import TableBinding
 from app.state import state
 from app.db.pools import Pools
@@ -23,7 +24,10 @@ class WriteService:
             data: dict,
             now: datetime,
     ) -> bool:
-        table_binding: TableBinding = state.TABLES_CONFIG[table]
+        table_binding: TableBinding = state.TABLES_CONFIG.get(table)
+        if table_binding is None:
+            raise ValidationError("table not found")
+
         schema: TableSchema = table_binding.schema
 
         entity_key = normalize_entity(schema, entity)
@@ -39,7 +43,7 @@ class WriteService:
 
         if mode == "scd":
             if not table_binding.has_current() or not table_binding.has_history():
-                raise ValueError(f"SCD requires current+history for '{schema.name}'")
+                raise ValidationError(f"SCD requires current+history for '{schema.name}'")
             return await pool_current.save_scd(
                 schema,
                 entity_key,
@@ -50,7 +54,7 @@ class WriteService:
 
         if mode == "current":
             if not table_binding.has_current():
-                raise ValueError(f"Current mode requires current table for '{schema.name}'")
+                raise ValidationError(f"Current mode requires current table for '{schema.name}'")
             return await pool_current.save_current(
                 schema,
                 entity_key,
@@ -60,7 +64,7 @@ class WriteService:
 
         if mode == "append":
             if not table_binding.has_history():
-                raise ValueError(f"Append mode requires history table for '{schema.name}'")
+                raise ValidationError(f"Append mode requires history table for '{schema.name}'")
             return await pool_history.append_history(
                 schema,
                 entity_key,
@@ -68,4 +72,4 @@ class WriteService:
                 now=now,
             )
 
-        raise ValueError(f"Invalid write_mode for '{schema.name}': {mode}")
+        raise ValidationError(f"Invalid write_mode for '{schema.name}': {mode}")

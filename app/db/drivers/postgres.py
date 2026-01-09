@@ -6,6 +6,7 @@ import json
 
 import asyncpg
 
+from app.api.errors import ValidationError
 from app.db.table_schema import TableSchema, FieldConfig
 from app.db.field_types import FieldType
 from app.db.database import DatabaseDriver
@@ -313,7 +314,7 @@ class PostgresDriver(DatabaseDriver):
         table = f"{schema.name}{schema.history_prefix if is_history else schema.current_prefix}"
 
         if not sort_by:
-            raise ValueError("sort_by is required")
+            raise ValidationError("sort_by is required")
 
         select_sql = _build_select_fields_pg(schema, is_history=is_history, fields=fields or [])
         where_sql, where_vals, next_idx = _build_where_pg(schema, is_history=is_history, filters=filters, start_idx=1)
@@ -325,7 +326,7 @@ class PostgresDriver(DatabaseDriver):
         data_sql = f"SELECT {select_sql} FROM {table} {where} {order_sql} LIMIT ${next_idx} OFFSET ${next_idx + 1}"
         vals_q = list(where_vals) + [limit, offset]
 
-        logging.warning(f"POSTGRES GET_RECORDS: {data_sql}")
+        # logging.warning(f"POSTGRES GET_RECORDS: {data_sql}")
 
         async with self.pool.acquire() as conn:
             total = await conn.fetchval(count_sql, *where_vals)
@@ -347,16 +348,16 @@ class PostgresDriver(DatabaseDriver):
         table = f"{schema.name}{schema.history_prefix if is_history else schema.current_prefix}"
 
         if not sort_by:
-            raise ValueError("sort_by is required")
+            raise ValidationError("sort_by is required")
         if len(aggs) == 0:
-            raise ValueError("aggs is required")
+            raise ValidationError("aggs is required")
 
         allowed_cols = _all_schema_fields(schema, is_history)
         if not group_by:
-            raise ValueError("group_by is required")
+            raise ValidationError("group_by is required")
         for c in group_by:
             if c not in allowed_cols:
-                raise ValueError(f"Unknown group_by field '{c}' for table '{schema.name}'")
+                raise ValidationError(f"Unknown group_by field '{c}' for table '{schema.name}'")
 
         aggs_sql, agg_aliases, agg_expr_map = _build_aggs_pg(schema, is_history, aggs)
 
@@ -364,7 +365,7 @@ class PostgresDriver(DatabaseDriver):
 
         for s in sort_by:
             if s.field not in output_allowed:
-                raise ValueError(f"Unknown sort_by field '{s.field}' (allowed: group_by + agg aliases)")
+                raise ValidationError(f"Unknown sort_by field '{s.field}' (allowed: group_by + agg aliases)")
 
         select_list = ", ".join(group_by) + (", " if group_by else "") + aggs_sql
 
@@ -406,8 +407,8 @@ class PostgresDriver(DatabaseDriver):
         vals_all = list(where_vals) + list(having_vals)
         vals_q = vals_all + [limit, offset]
 
-        logging.warning(f"POSTGRES GET_GROUP: {data_sql}")
-        logging.warning(f"POSTGRES GET_GROUP2: {count_sql}")
+        # logging.warning(f"POSTGRES GET_GROUP: {data_sql}")
+        # logging.warning(f"POSTGRES GET_GROUP2: {count_sql}")
 
         async with self.pool.acquire() as conn:
             total = await conn.fetchval(count_sql, *vals_all)
@@ -441,7 +442,7 @@ class PostgresDriver(DatabaseDriver):
             for cols in schema.indexes:
                 for col in cols:
                     if not any(f.name == col for f in all_fields):
-                        raise ValueError(f"Index field '{col}' not found in {schema.name} fields")
+                        raise ValidationError(f"Index field '{col}' not found in {schema.name} fields")
 
                 cols_str = ", ".join(cols)
 
@@ -622,12 +623,12 @@ def _normalize_filter_expr(expr: Any) -> Tuple[str, Any]:
         op = expr.get("op")
         val = expr.get("value")
         if op is None or val is None:
-            raise ValueError("Invalid filter dict, expected {op, value}")
+            raise ValidationError("Invalid filter dict, expected {op, value}")
         return op, val
     # pydantic FilterClause-like
     if hasattr(expr, "op") and hasattr(expr, "value"):
         return getattr(expr, "op"), getattr(expr, "value")
-    raise ValueError("Invalid filter expression")
+    raise ValidationError("Invalid filter expression")
 
 
 def _all_schema_fields(schema: TableSchema, is_history: bool) -> Dict[str, FieldConfig]:
@@ -641,7 +642,7 @@ def _build_select_fields_pg(schema: TableSchema, is_history: bool, fields: List[
     allowed = _all_schema_fields(schema, is_history)
     for c in fields:
         if c not in allowed:
-            raise ValueError(f"Unknown field '{c}' for table '{schema.name}'")
+            raise ValidationError(f"Unknown field '{c}' for table '{schema.name}'")
     return ", ".join(fields)
 
 
@@ -652,8 +653,9 @@ def _build_order_by_pg(schema: TableSchema, is_history: bool, sort_by: SortBy, a
 
     parts: List[str] = []
     for s in sort_by:
+        validate_sql_col(s.field)
         if s.field not in allowed:
-            raise ValueError(f"Unknown sort field '{s.field}' for table '{schema.name}'")
+            raise ValidationError(f"Unknown sort field '{s.field}' for table '{schema.name}'")
         d = "ASC" if s.dir == "asc" else "DESC"
         parts.append(f"{s.field} {d}")
 
@@ -665,7 +667,7 @@ def _pg_op(op: str) -> str:
         return op
     if op == "in":
         return "IN"
-    raise ValueError(f"Unsupported filter op: {op}")
+    raise ValidationError(f"Unsupported filter op: {op}")
 
 
 def _build_where_pg(schema: TableSchema, is_history: bool, filters: FilterGroups, *, start_idx: int = 1,
@@ -685,7 +687,7 @@ def _build_where_pg(schema: TableSchema, is_history: bool, filters: FilterGroups
         and_parts: List[str] = []
         for name, clause in g.items():
             if name not in allowed_fields:
-                raise ValueError(f"Unknown filter field '{name}' for table '{schema.name}'")
+                raise ValidationError(f"Unknown filter field '{name}' for table '{schema.name}'")
 
             if isinstance(clause, FilterClause):
                 op = clause.op
@@ -700,7 +702,7 @@ def _build_where_pg(schema: TableSchema, is_history: bool, filters: FilterGroups
 
             if op == "in":
                 if not isinstance(raw_val, list):
-                    raise ValueError(f"Filter '{name}' with op=in must be a list")
+                    raise ValidationError(f"Filter '{name}' with op=in must be a list")
                 and_parts.append(f"{name} = ANY(${idx})")
                 values.append([convert_value(x, fcfg.type) for x in raw_val])
                 idx += 1
@@ -739,7 +741,7 @@ def _build_aggs_pg(schema, is_history: bool, aggs: Aggregates) -> Tuple[str, Lis
         elif spec.op == AggOp.uniq:
             col = validate_sql_col(spec.field or "")
             if col not in allowed_cols:
-                raise ValueError(f"Unknown aggregate field '{col}'")
+                raise ValidationError(f"Unknown aggregate field '{col}'")
             expr = f"COUNT(DISTINCT {col})"
 
         elif spec.op == AggOp.custom:
@@ -747,19 +749,19 @@ def _build_aggs_pg(schema, is_history: bool, aggs: Aggregates) -> Tuple[str, Lis
             # pydantic уже regex проверил, но whitelist — здесь
             fn = PG_CUSTOM_AGGS.get(name)
             if not fn:
-                raise ValueError(f"Unsupported custom aggregate '{name}' for postgres")
+                raise ValidationError(f"Unsupported custom aggregate '{name}' for postgres")
             # обычно кастомным тоже нужен field (но решай сам):
             if not spec.field:
-                raise ValueError(f"Custom aggregate '{name}' requires 'field'")
+                raise ValidationError(f"Custom aggregate '{name}' requires 'field'")
             col = validate_sql_col(spec.field)
             if col not in allowed_cols:
-                raise ValueError(f"Unknown aggregate field '{col}'")
+                raise ValidationError(f"Unknown aggregate field '{col}'")
             expr = fn(col)
 
         else:
             col = validate_sql_col(spec.field or "")
             if col not in allowed_cols:
-                raise ValueError(f"Unknown aggregate field '{col}'")
+                raise ValidationError(f"Unknown aggregate field '{col}'")
             fn = spec.op.value.upper()
             expr = f"{fn}({col})"
 
@@ -786,7 +788,7 @@ def _build_having_pg(
         for name, clause in g.items():
             validate_sql_col(name)
             if name not in output_allowed:
-                raise ValueError(f"Unknown having field '{name}' (allowed: group_by + agg aliases)")
+                raise ValidationError(f"Unknown having field '{name}' (allowed: group_by + agg aliases)")
 
             if isinstance(clause, FilterClause):
                 op = clause.op
@@ -802,7 +804,7 @@ def _build_having_pg(
 
             if op == "in":
                 if not isinstance(raw_val, list):
-                    raise ValueError(f"Having '{name}' with op=in must be a list")
+                    raise ValidationError(f"Having '{name}' with op=in must be a list")
                 and_parts.append(f"{expr} = ANY(${idx})")
                 values.append(list(raw_val))
                 idx += 1

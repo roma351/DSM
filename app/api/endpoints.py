@@ -14,32 +14,18 @@ router = APIRouter()
 
 @router.post("/write/save")
 async def save_endpoint(req: SaveRequest) -> SaveResponse:
-    if req.entity is None and req.entity_id:
-        req.entity = {"entity_id": req.entity_id}
-
-    try:
-        changed = await WriteService.save(
-            req.table, req.entity, req.data, req.now
-        )
-    except Exception as e:
-        logging.error(e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    changed = await WriteService.save(
+        req.table, req.entity, req.data, req.now
+    )
 
     return SaveResponse(success=True, changed=changed)
 
 
 @router.post("/read/get")
 async def get_endpoint(req: GetRequest) -> dict | None:
-    if req.entity is None and req.entity_id:
-        req.entity = {"entity_id": req.entity_id}
-
-    try:
-        record = await ReadService.get_current(
-            req.table, req.entity
-        )
-    except Exception as e:
-        logging.error(e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    record = await ReadService.get_current(
+        req.table, req.entity
+    )
 
     if not record:
         raise HTTPException(status_code=404, detail="Not found")
@@ -48,43 +34,31 @@ async def get_endpoint(req: GetRequest) -> dict | None:
 
 @router.post("/read/query")
 async def query_endpoint(req: QueryRequest) -> QueryResponse:
-    try:
-        records, total = await ReadService.query(
-            req.table, req.fields, req.filters,
-            req.limit, req.offset, req.sort_by
-        )
-    except Exception as e:
-        logging.error(e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    records, total = await ReadService.query(
+        req.table, req.fields, req.filters,
+        req.limit, req.offset, req.sort_by
+    )
 
     return QueryResponse(results=records, count=len(records), total=total)
 
 
 @router.post("/read/history")
 async def history_endpoint(req: HistoryRequest) -> HistoryResponse:
-    try:
-        history, total = await ReadService.get_history(
-            req.table, req.fields, req.filters,
-            req.limit, req.offset, req.sort_by
-        )
-    except Exception as e:
-        logging.error(e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    history, total = await ReadService.get_history(
+        req.table, req.fields, req.filters,
+        req.limit, req.offset, req.sort_by
+    )
 
     return HistoryResponse(history=history, count=len(history), total=total)
 
 
 @router.post("/read/group")
 async def group_endpoint(req: GroupRequest) -> GroupResponse:
-    try:
-        results, total = await ReadService.get_grouped(
-            req.table, req.is_history, req.filters,
-            req.group_by, req.aggs, req.having,
-            req.limit, req.offset, req.sort_by
-        )
-    except Exception as e:
-        logging.error(e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    results, total = await ReadService.get_grouped(
+        req.table, req.is_history, req.filters,
+        req.group_by, req.aggs, req.having,
+        req.limit, req.offset, req.sort_by
+    )
 
     return GroupResponse(results=results, count=len(results), total=total)
 

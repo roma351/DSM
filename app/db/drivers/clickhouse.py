@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast, L
 from asynch import Pool
 from asynch.cursors import DictCursor
 
+from app.api.errors import ValidationError
 from app.db.database import DatabaseDriver
 from app.db.table_schema import TableSchema, FieldConfig
 from app.db.field_types import FieldType
@@ -41,7 +42,7 @@ def _ch_base_type(ft: FieldType) -> str:
         return "DateTime64(3, 'UTC')"
     if ft in (FieldType.VARCHAR, FieldType.CHAR, FieldType.TEXT, FieldType.JSONB):
         return "String"
-    raise ValueError(f"Unsupported FieldType: {ft}")
+    raise ValidationError(f"Unsupported FieldType: {ft}")
 
 
 def _ch_value(v: Any) -> Any:
@@ -420,7 +421,7 @@ class ClickHouseDriver(DatabaseDriver):
         for f in schema.entity_fields:
             v = current.get(f.name)
             if not isinstance(v, (int, str)):
-                raise ValueError(f"Invalid entity key '{f.name}' in current row for '{schema.name}'")
+                raise ValidationError(f"Invalid entity key '{f.name}' in current row for '{schema.name}'")
             entity[f.name] = v
 
         search_fields_data = {f.name: current.get(f.name) for f in schema.search_fields if f.name in current}
@@ -496,7 +497,7 @@ class ClickHouseDriver(DatabaseDriver):
         table = self._db_table(schema, is_history=is_history)
 
         if not sort_by:
-            raise ValueError("sort_by is required")
+            raise ValidationError("sort_by is required")
 
         select_sql = _build_select_fields_ch(schema, is_history=is_history, fields=fields or [])
         where_sql, params = _build_where_ch_groups(schema, is_history=is_history, filters=filters, param_prefix="w")
@@ -536,7 +537,7 @@ class ClickHouseDriver(DatabaseDriver):
             count_sql = f"SELECT count() AS cnt FROM {table} {where}"
             data_sql = f"SELECT {select_sql} FROM {table} {where} {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
 
-        logging.warning(f"CLICKHOUSE GET_RECORDS: {data_sql}")
+        # logging.warning(f"CLICKHOUSE GET_RECORDS: {data_sql}")
 
         async with self.pool.connection() as conn:
             async with conn.cursor(DictCursor) as cur:
@@ -563,16 +564,16 @@ class ClickHouseDriver(DatabaseDriver):
         table = self._db_table(schema, is_history=is_history)
 
         if not sort_by:
-            raise ValueError("sort_by is required")
+            raise ValidationError("sort_by is required")
         if len(aggs) == 0:
-            raise ValueError("aggs is required")
+            raise ValidationError("aggs is required")
 
         allowed_cols = _all_schema_fields_ch(schema, is_history=is_history)
         if not group_by:
-            raise ValueError("group_by is required")
+            raise ValidationError("group_by is required")
         for c in group_by:
             if c not in allowed_cols:
-                raise ValueError(f"Unknown group_by field '{c}' for table '{schema.name}'")
+                raise ValidationError(f"Unknown group_by field '{c}' for table '{schema.name}'")
 
         aggs_sql, agg_aliases, agg_expr_map = _build_aggs_ch(schema, is_history, aggs)
 
@@ -580,7 +581,7 @@ class ClickHouseDriver(DatabaseDriver):
 
         for s in sort_by:
             if s.field not in output_allowed:
-                raise ValueError(f"Unknown sort_by field '{s.field}' (allowed: group_by + agg aliases)")
+                raise ValidationError(f"Unknown sort_by field '{s.field}' (allowed: group_by + agg aliases)")
 
         # SELECT: group_by + aggs
         select_list = ", ".join(f"`{c}`" for c in group_by)
@@ -658,8 +659,8 @@ class ClickHouseDriver(DatabaseDriver):
                 LIMIT {int(limit)} OFFSET {int(offset)}
             """
 
-        logging.warning(f"CLICKHOUSE GET_GROUP: {data_sql}")
-        logging.warning(f"CLICKHOUSE GET_GROUP2: {count_sql}")
+        # logging.warning(f"CLICKHOUSE GET_GROUP: {data_sql}")
+        # logging.warning(f"CLICKHOUSE GET_GROUP2: {count_sql}")
 
         async with self.pool.connection() as conn:
             async with conn.cursor(DictCursor) as cur:
@@ -804,11 +805,11 @@ def _normalize_filter_expr(expr: Any) -> Tuple[str, Any]:
         op = expr.get("op")
         val = expr.get("value")
         if op is None or val is None:
-            raise ValueError("Invalid filter dict, expected {op, value}")
+            raise ValidationError("Invalid filter dict, expected {op, value}")
         return op, val
     if hasattr(expr, "op") and hasattr(expr, "value"):
         return getattr(expr, "op"), getattr(expr, "value")
-    raise ValueError("Invalid filter expression")
+    raise ValidationError("Invalid filter expression")
 
 
 def _build_filters_where_ch(
@@ -842,7 +843,7 @@ def _build_filters_where_ch(
 
             if op == "in":
                 if not isinstance(val, list):
-                    raise ValueError(f"Filter '{col}' expects list for op 'in'")
+                    raise ValidationError(f"Filter '{col}' expects list for op 'in'")
 
                 pname = f"f{gi}_{col}"
                 and_parts.append(f"`{col}` IN {{{pname}}}")
@@ -850,7 +851,7 @@ def _build_filters_where_ch(
                 continue
 
             if op not in ("=", "!=", "<", "<=", ">", ">="):
-                raise ValueError(f"Unsupported filter op: {op}")
+                raise ValidationError(f"Unsupported filter op: {op}")
 
             pname = f"f{gi}_{col}"
             and_parts.append(f"`{col}` {op} {{{pname}}}")
@@ -875,7 +876,7 @@ def _build_select_fields_ch(schema: TableSchema, is_history: bool, fields: List[
     allowed = _all_schema_fields_ch(schema, is_history)
     for c in fields:
         if c not in allowed:
-            raise ValueError(f"Unknown field '{c}' for table '{schema.name}'")
+            raise ValidationError(f"Unknown field '{c}' for table '{schema.name}'")
     return ", ".join(f"`{c}`" for c in fields)
 
 
@@ -886,8 +887,9 @@ def _build_order_by_ch(schema: TableSchema, is_history: bool, sort_by: SortBy, a
 
     parts: List[str] = []
     for s in sort_by:
+        validate_sql_col(s.field)
         if s.field not in allowed:
-            raise ValueError(f"Unknown sort field '{s.field}' for table '{schema.name}'")
+            raise ValidationError(f"Unknown sort field '{s.field}' for table '{schema.name}'")
         d = "ASC" if s.dir == "asc" else "DESC"
         parts.append(f"`{s.field}` {d}")
 
@@ -905,7 +907,7 @@ def _build_where_ch_groups(schema: TableSchema, is_history: bool, filters: Filte
         and_parts: List[str] = []
         for name, clause in g.items():
             if name not in allowed:
-                raise ValueError(f"Unknown filter field '{name}' for table '{schema.name}'")
+                raise ValidationError(f"Unknown filter field '{name}' for table '{schema.name}'")
 
             if isinstance(clause, FilterClause):
                 op = clause.op
@@ -920,7 +922,7 @@ def _build_where_ch_groups(schema: TableSchema, is_history: bool, filters: Filte
 
             if op == "in":
                 if not isinstance(raw_val, list):
-                    raise ValueError(f"Filter '{name}' with op=in must be a list")
+                    raise ValidationError(f"Filter '{name}' with op=in must be a list")
                 and_parts.append(f"`{name}` IN {{{pname}}}")
                 params[pname] = tuple(_ch_value(convert_value(x, fcfg.type)) for x in raw_val)
             else:
@@ -959,25 +961,25 @@ def _build_aggs_ch(schema, is_history: bool, aggs: Aggregates) -> Tuple[str, Lis
         elif spec.op == AggOp.uniq:
             col = validate_sql_col(spec.field or "")
             if col not in allowed_cols:
-                raise ValueError(f"Unknown aggregate field '{col}'")
+                raise ValidationError(f"Unknown aggregate field '{col}'")
             expr = f"uniq({col})"
 
         elif spec.op == AggOp.custom:
             name = spec.custom_name or ""
             fn = CH_CUSTOM_AGGS.get(name)
             if not fn:
-                raise ValueError(f"Unsupported custom aggregate '{name}' for clickhouse")
+                raise ValidationError(f"Unsupported custom aggregate '{name}' for clickhouse")
             if not spec.field:
-                raise ValueError(f"Custom aggregate '{name}' requires 'field'")
+                raise ValidationError(f"Custom aggregate '{name}' requires 'field'")
             col = validate_sql_col(spec.field)
             if col not in allowed_cols:
-                raise ValueError(f"Unknown aggregate field '{col}'")
+                raise ValidationError(f"Unknown aggregate field '{col}'")
             expr = fn(col)
 
         else:
             col = validate_sql_col(spec.field or "")
             if col not in allowed_cols:
-                raise ValueError(f"Unknown aggregate field '{col}'")
+                raise ValidationError(f"Unknown aggregate field '{col}'")
             fn = spec.op.value
             expr = f"{fn}({col})"
 
@@ -1004,7 +1006,7 @@ def _build_having_ch(
         for name, clause in g.items():
             validate_sql_col(name)
             if name not in output_allowed:
-                raise ValueError(f"Unknown having field '{name}' (allowed: group_by + agg aliases)")
+                raise ValidationError(f"Unknown having field '{name}' (allowed: group_by + agg aliases)")
 
             if isinstance(clause, FilterClause):
                 op = clause.op
@@ -1020,12 +1022,12 @@ def _build_having_ch(
 
             if op == "in":
                 if not isinstance(raw_val, list):
-                    raise ValueError(f"Having '{name}' with op=in must be a list")
+                    raise ValidationError(f"Having '{name}' with op=in must be a list")
                 and_parts.append(f"{expr} IN {{{pname}}}")
                 params[pname] = tuple(raw_val)
             else:
                 if op not in ("=", "!=", "<", "<=", ">", ">="):
-                    raise ValueError(f"Unsupported op '{op}'")
+                    raise ValidationError(f"Unsupported op '{op}'")
                 and_parts.append(f"{expr} {op} {{{pname}}}")
                 params[pname] = raw_val
 

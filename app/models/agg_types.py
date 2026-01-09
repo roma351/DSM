@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Dict, Optional
 from pydantic import BaseModel, model_validator
 
+from app.api.errors import ValidationError
 from app.utils.sql_ident import validate_sql_alias, validate_sql_col, validate_sql_func
 
 
@@ -24,11 +25,11 @@ class AggSpec(BaseModel):
     @model_validator(mode="after")
     def _validate(self):
         if self.op in (AggOp.sum, AggOp.avg, AggOp.min, AggOp.max, AggOp.uniq) and not self.field:
-            raise ValueError(f"Aggregate '{self.op}' requires 'field'")
+            raise ValidationError(f"Aggregate '{self.op}' requires 'field'")
 
         if self.op == AggOp.custom:
             if not self.custom_name:
-                raise ValueError("Aggregate 'custom' requires 'custom_name'")
+                raise ValidationError("Aggregate 'custom' requires 'custom_name'")
             validate_sql_func(self.custom_name)
 
         if self.field is not None:

@@ -1,19 +1,21 @@
 from typing import Optional, Union
+
+from app.api.errors import ValidationError
 from app.models.filter_types import EntityKey, FilterClause, FilterGroup, FilterGroups
 
 
 def normalize_entity(entity: Optional[EntityKey], entity_id: Optional[str]) -> EntityKey:
     if entity is None:
         if entity_id is None:
-            raise ValueError("Either 'entity' or 'entity_id' must be provided")
+            raise ValidationError("Either 'entity' or 'entity_id' must be provided")
         return {"entity_id": entity_id}
 
     if not isinstance(entity, dict) or not entity:
-        raise ValueError("'entity' must be a non-empty dict")
+        raise ValidationError("'entity' must be a non-empty dict")
 
     for k, v in entity.items():
         if not isinstance(v, (int, str)):
-            raise ValueError(f"Invalid entity value for '{k}', expected int|str")
+            raise ValidationError(f"Invalid entity value for '{k}', expected int|str")
 
     return entity
 
@@ -29,7 +31,7 @@ def normalize_filters(filters: Union[FilterGroups, FilterGroup, None]) -> Filter
     norm: FilterGroups = []
     for g in groups:
         if not isinstance(g, dict) or not g:
-            raise ValueError("Each filters group must be a non-empty dict")
+            raise ValidationError("Each filters group must be a non-empty dict")
 
         ng: FilterGroup = {}
         for name, expr in g.items():
@@ -43,10 +45,10 @@ def normalize_filters(filters: Union[FilterGroups, FilterGroup, None]) -> Filter
                 op = expr.get("op")
                 val = expr.get("value")
                 if op is None or val is None:
-                    raise ValueError(f"Invalid filter for '{name}': expected {{op, value}}")
+                    raise ValidationError(f"Invalid filter for '{name}': expected {{op, value}}")
                 ng[name] = FilterClause(op=op, value=val)
             else:
-                raise ValueError(f"Invalid filter value for '{name}'")
+                raise ValidationError(f"Invalid filter value for '{name}'")
         norm.append(ng)
 
     return norm
