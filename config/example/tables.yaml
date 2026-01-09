@@ -1,0 +1,11 @@
+tables:
+  average_scores:
+    schema: tables.example.average_scores:AverageScoresTable
+
+  tg_users:
+    schema: tables.example.tg_users:TgUsers
+
+  test:
+   schema: tables.example.test:TestTable
+   database: default
+   history_database: default

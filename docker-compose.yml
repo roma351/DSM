@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: dsm_postgres
+    environment:
+      POSTGRES_DB: school_diary_dsm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: dsm_app
+    ports:
+      - "3239:3239"
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: school_diary_dsm
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      PYTHONPATH: /code
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    command: >
+      sh -c "sleep 5 && python -m app.main"
+    volumes:
+      - ./app:/code/app
+
+volumes:
+  postgres_data:

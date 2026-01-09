@@ -1,0 +1,16 @@
+api_keys:
+  main_key:
+    key: ${API_KEY}
+    tables:
+      _:
+        - "*"
+
+  read_key:
+    key: ${API_KEY_READ}
+    tables:
+      _:
+        - /read/get
+        - /read/query
+        - /read/history
+        - /config/tables
+        - /health

@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>DSM Admin</title>
+  <style>
+    :root { --bg:#0b0d10; --card:#12161c; --muted:#7f8a99; --text:#e8edf4; --line:#1f2630; }
+    * { box-sizing:border-box; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    body { margin:0; background:var(--bg); color:var(--text); }
+    header { position:sticky; top:0; background:rgba(11,13,16,.9); backdrop-filter: blur(8px); border-bottom:1px solid var(--line); z-index:5;}
+    .wrap { max-width:1200px; margin:0 auto; padding:10px 12px; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; min-width:0; }
+    .grow { flex:1; min-width:160px; }
+    input, textarea, button, select {
+      width:100%; border-radius:12px; border:1px solid var(--line);
+      background:#0f1318; color:var(--text); padding:10px 12px; outline:none;
+    }
+    textarea { min-height:120px; resize:vertical; }
+    button { cursor:pointer; background:linear-gradient(180deg, #1a2230, #121824); }
+    button.primary { background:linear-gradient(180deg, #1e3b66, #12233c); border-color:#2a5fa5; }
+    button.small { width:auto; padding:8px 10px; border-radius:10px; font-size:12px; }
+    .muted { color:var(--muted); font-size:12px; }
+    .pill { display:inline-block; padding:4px 10px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:12px; }
+    .hidden { display:none !important; }
+    .divider { border:0; border-top:1px solid var(--line); margin:12px 0; }
+
+    .grid { display:grid; grid-template-columns: 360px 1fr; gap:12px; margin-top:12px; align-items:start; }
+    .grid.expanded { grid-template-columns: 1fr; }
+    .grid.expanded > section:first-child { display:none; }
+
+    .secHead { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .secTitle { font-weight:900; }
+    .secBody { margin-top:10px; }
+    .clickHead { cursor:pointer; user-select:none; }
+    .clickHead:active { transform: translateY(1px); }
+
+    .picker { position:relative; }
+    .pickerBtn { text-align:left; display:flex; gap:10px; align-items:center; justify-content:space-between; }
+    .pickerMenu {
+      position:absolute; left:0; right:0; top:calc(100% + 8px);
+      background:var(--card); border:1px solid var(--line); border-radius:14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      padding:10px; z-index:20;
+    }
+    .list { max-height:280px; overflow:auto; margin-top:8px; border-top:1px solid var(--line); padding-top:8px; }
+    .item {
+      padding:10px; border-radius:12px; border:1px solid transparent;
+      cursor:pointer; display:flex; justify-content:space-between; gap:10px;
+    }
+    .item:hover { border-color: var(--line); background:#0f1318; }
+    .itemName { font-weight:800; }
+
+    .tableWrap {
+      max-width:100%;
+      overflow-x:auto; overflow-y:hidden;
+      -webkit-overflow-scrolling: touch;
+      border-radius:14px; border:1px solid var(--line);
+    }
+    table { width:100%; border-collapse:collapse; min-width:900px; }
+    th, td { border-bottom:1px solid var(--line); padding:10px; text-align:left; font-size:13px; white-space:nowrap; }
+    th { position:sticky; top:0; background:#0f1318; z-index:1; color:#b9c6d8; }
+    tr:hover td { background:#0f141b; }
+    .cellTrunc { max-width:340px; overflow:hidden; text-overflow:ellipsis; }
+    .cellClickable { cursor:pointer; }
+    .cellLink { cursor:pointer; text-decoration: underline; text-decoration-style:dotted; } /* только entity_id */
+
+    .kv { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    @media (max-width: 720px){ .kv{ grid-template-columns: 1fr; } }
+
+    @media (max-width: 980px){
+      .grid { grid-template-columns: 1fr; }
+      table { min-width: 900px; }
+    }
+
+    .modalBack {
+      position:fixed; inset:0; background:rgba(0,0,0,.55);
+      display:flex; align-items:center; justify-content:center; padding:14px;
+      z-index:999;
+    }
+    .modal {
+      width:min(980px, 100%);
+      max-height: min(86vh, 900px);
+      overflow:auto;
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.45);
+      padding:12px;
+    }
+    .modalHead { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .modalTitle { font-weight:900; }
+    .pre {
+      white-space:pre-wrap;
+      word-break: break-word;
+      background:#0f1318;
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size:12px;
+      color:var(--text);
+    }
+    /* растягивать последний input в kv, если стоит класс .odd */
+.kv.odd > input:last-child { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrap row">
+    <div style="font-weight:900;">DSM Admin</div>
+    <span class="pill" id="tablePill">—</span>
+    <div class="grow"></div>
+    <button class="small" id="infoBtn">Info</button>
+    <button class="small" id="toggleSettingsBtn">⚙️</button>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="card" id="settingsCard">
+    <div class="secHead">
+      <div class="secTitle">Вход</div>
+      <button class="small hidden" id="closeSettingsBtn">×</button>
+    </div>
+
+    <div class="secBody">
+      <div id="loginView">
+        <input id="apiKeyInput" placeholder="API key"/>
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          <button class="small primary" id="loginBtn">Войти</button>
+        </div>
+      </div>
+
+      <div id="authedView" class="hidden">
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="small" id="logoutBtn">Выйти</button>
+          <button class="small" id="toggleDecodeBtn">Автодекод: выкл</button>
+          <button class="small" id="toggleSearchColsBtn">Search поля: выкл</button>
+          <button class="small" id="toggleLocalTimeBtn">Локальное время: вкл</button>
+          <button class="small" id="toggleRelativeTimeBtn">Относительное: выкл</button>
+        </div>
+      </div>
+
+      <div class="muted" style="margin-top:8px;" id="statusLine">—</div>
+    </div>
+  </section>
+
+  <div class="grid hidden" id="grid">
+
+    <section class="card">
+      <div class="secTitle">Таблица</div>
+
+      <div class="secBody picker" id="picker">
+        <button class="pickerBtn" id="pickerBtn">
+          <span id="pickerBtnText">Выбрать…</span>
+          <span class="muted">▼</span>
+        </button>
+
+        <div class="pickerMenu hidden" id="pickerMenu">
+          <input id="tableSearchInput" placeholder="Поиск…"/>
+          <div class="list" id="tableList"></div>
+        </div>
+      </div>
+
+      <div id="blkQuery">
+        <hr class="divider">
+
+        <div class="secHead clickHead" id="queryHead">
+          <div class="secTitle">Query</div>
+          <button class="small" id="toggleQueryBtn" tabindex="-1">▸</button>
+        </div>
+
+        <div class="secBody hidden" id="querySection">
+
+          <button class="small" id="toggleFiltersBtn">Фильтры ▸</button>
+          <div class="" id="filtersSection">
+            <div id="filtersBoxQuery"></div>
+          </div>
+
+          <button class="small" id="toggleAdvancedBtn" style="margin-top:10px;">
+            Дополнительно ▸
+          </button>
+          <div class="hidden" id="advancedSection">
+            <div class="kv">
+              <input id="limitInput" placeholder="limit" value="50">
+              <input id="offsetInput" placeholder="offset" value="0">
+              <select id="sortSelect">
+                <option value="desc">desc</option>
+                <option value="asc">asc</option>
+              </select>
+              <input id="atDateInput" placeholder="at_date">
+            </div>
+          </div>
+
+          <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+            <button class="small primary" id="runQueryBtn">Показать</button>
+            <button class="small" id="prevBtn">‹</button>
+            <button class="small" id="nextBtn">›</button>
+          </div>
+
+        </div>
+      </div>
+
+      <div id="blkGet">
+        <hr class="divider">
+
+        <div class="secHead clickHead" id="getHead">
+          <div class="secTitle">Get</div>
+          <button class="small" id="toggleGetBtn" tabindex="-1">▸</button>
+        </div>
+
+        <div class="secBody hidden" id="getSection">
+          <div class="kv" id="entityBoxGet"></div>
+
+          <div style="margin-top:12px;">
+            <button class="small primary" id="getBtn">Получить</button>
+          </div>
+
+        </div>
+      </div>
+
+      <div id="blkHistory">
+        <hr class="divider">
+
+        <div class="secHead clickHead" id="historyHead">
+          <div class="secTitle">History</div>
+          <button class="small" id="toggleHistoryBtn" tabindex="-1">▸</button>
+        </div>
+
+        <div class="secBody hidden" id="historySection">
+
+          <button class="small" id="toggleHistoryFiltersBtn">Фильтры ▸</button>
+          <div class="" id="historyFiltersSection">
+            <div id="filtersBoxHistory"></div>
+          </div>
+
+          <button class="small" id="toggleHistoryAdvancedBtn" style="margin-top:10px;">
+            Дополнительно ▸
+          </button>
+          <div class="hidden" id="historyAdvancedSection">
+            <div class="kv">
+              <input id="historyLimitInput" placeholder="limit" value="100">
+              <input id="historyOffsetInput" placeholder="offset" value="0">
+              <select id="historySortSelect">
+                <option value="desc" selected>desc</option>
+                <option value="asc">asc</option>
+              </select>
+              <input id="fromDateInput" placeholder="from_date">
+              <input id="toDateInput" placeholder="to_date">
+            </div>
+          </div>
+
+          <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+            <button class="small primary" id="historyBtn">Показать</button>
+            <button class="small" id="historyPrevBtn">‹</button>
+            <button class="small" id="historyNextBtn">›</button>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="secHead">
+        <div>
+          <div class="secTitle">Результаты</div>
+          <div class="muted" id="metaLine">—</div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="small" id="expandBtn">↔</button>
+          <button class="small hidden" id="expandPrevBtn">‹</button>
+          <button class="small hidden" id="expandNextBtn">›</button>
+          <button class="small" id="rawBtn">Raw</button>
+          <button class="small" id="copyBtn">Копировать</button>
+        </div>
+      </div>
+
+      <div class="secBody">
+        <div class="tableWrap" id="tableWrap">
+          <table>
+            <thead><tr id="theadRow"></tr></thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+
+        <div style="display:flex; gap:8px; justify-content:center; margin-top:10px;" id="bottomPager">
+          <button class="small" id="bottomPrevBtn">‹</button>
+          <div class="muted" id="bottomPageText">—</div>
+          <button class="small" id="bottomNextBtn">›</button>
+        </div>
+      </div>
+
+      <textarea id="rawArea" class="hidden" readonly></textarea>
+    </section>
+
+  </div>
+</main>
+
+<div class="modalBack hidden" id="modalBack" role="dialog" aria-modal="true">
+  <div class="modal">
+    <div class="modalHead">
+      <div class="modalTitle" id="modalTitle">—</div>
+      <div style="display:flex; gap:8px;">
+        <button class="small" id="modalCopyBtn">Копировать</button>
+        <button class="small" id="modalCloseBtn">×</button>
+      </div>
+    </div>
+    <div style="margin-top:10px;" id="modalBody"></div>
+  </div>
+</div>
+
+<script src="/admin/app.js"></script>
+</body>
+</html>
