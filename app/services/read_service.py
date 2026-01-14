@@ -81,6 +81,7 @@ class ReadService:
     async def get_grouped(
             table: str,
             is_history: bool,
+            fields: list[str],
             filters: FilterGroups,
             group_by: List[str],
             aggs: Aggregates,
@@ -103,4 +104,4 @@ class ReadService:
         db_key = table_binding.history_database if is_history else table_binding.database
         pool = Pools.get_pool(db_key)
 
-        return await pool.get_group(schema, is_history, filters, group_by, aggs, having, limit, offset, sort_by)
+        return await pool.get_group(schema, is_history, fields, filters, group_by, aggs, having, limit, offset, sort_by)

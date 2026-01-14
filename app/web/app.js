@@ -8,10 +8,10 @@ const LS_SHOW_SEARCH_COLS = "DSM_SHOW_SEARCH_COLS";
 const LS_LOCAL_TIME = "DSM_LOCAL_TIME";
 const LS_RELATIVE_TIME = "DSM_RELATIVE_TIME";
 const LS_LAST_TABLE = "DSM_LAST_TABLE";
-const LS_PRESETS = "DSM_FILTER_PRESETS_V1"; // общий json для query/history, по таблицам
+const LS_PRESETS = "DSM_FILTER_PRESETS_V2"; // groups + fields + sort_by, per-table
 
 const TS_KEYS = new Set(["created_at", "updated_at", "archived_at"]);
-const ALWAYS = ["entity_id", "created_at", "updated_at", "archived_at"];
+const ALWAYS = ["created_at", "updated_at", "archived_at"];
 const MAX_CELL = 140;
 
 const OPS = ["=", "!=", "<", "<=", ">", ">=", "in"];
@@ -29,9 +29,15 @@ const state = {
 
   filtersOpen: false,
   historyFiltersOpen: false,
-  getExtraFiltersOpen: false,
   advancedOpen: false,
   historyAdvancedOpen: false,
+
+  // Advanced sections inside "Дополнительно"
+  fieldsOpen: false,
+  historyFieldsOpen: false,
+  sortByOpen: false,
+  historySortByOpen: false,
+
 
   lastMode: null,       // "query" | "get" | "history"
   lastOffset: 0,
@@ -44,9 +50,36 @@ const state = {
   queryGroups: [[]],
   historyGroups: [[]],
 
+  // quick drafts
   queryDrafts: [{ id: 1, field: "", value: "" }],
   historyDrafts: [{ id: 1, field: "", value: "" }],
   draftSeq: 2,
+
+  groupFilterDrafts: [{ id: 1, field: "", value: "" }],
+  groupHavingDrafts: [{ id: 1, field: "", value: "" }],
+  groupFiltersOpen: false,
+  groupHavingOpen: false,
+  groupAdvancedOpen: false,
+  groupSortByOpen: false,
+
+  // fields + sort_by
+  queryFields: [],
+  historyFields: [],
+  querySortBy: [],
+  historySortBy: [],
+
+  groupIsHistory: false,
+
+  groupFiltersGroups: [[]],   // WHERE
+  groupHavingGroups: [[]],    // HAVING
+
+  groupBy: [],
+  groupAggs: { count: { op: "count", field: null } },
+  groupAggTouched: {},
+
+  groupSortBy: [],
+
+  groupGaOpen: true,
 };
 
 let modalCurrentText = "";
@@ -55,7 +88,6 @@ let modalCurrentText = "";
 let historyModal = {
   offset: 0,
   limit: 100,
-  sort: "desc",
   from_date: undefined,
   to_date: undefined,
   total: null,
@@ -64,8 +96,35 @@ let historyModal = {
   baseEntityFilters: {},
 };
 
+let drillModal = {
+  offset: 0,
+  limit: 50,
+  sort_by: [{ field: "updated_at", dir: "desc" }],
+  total: null,
+  cols: null,
+  rows: [],
+  filters: {},
+};
+
+let toastTimer = null;
+
+// ---------- UI helpers ----------
 function setStatus(msg) { const el = $("#statusLine"); if (el) el.textContent = msg || "—"; }
 function isTouchDevice() { return ("ontouchstart" in window) || (navigator.maxTouchPoints > 0); }
+
+function showToast(title, message) {
+  clearTimeout(toastTimer);
+  $("#toastTitle").textContent = title || "Ошибка";
+  $("#toastMsg").textContent = message || "—";
+  $("#toast").classList.remove("hidden");
+  toastTimer = setTimeout(() => hideToast(), 10_000);
+}
+function hideToast() {
+  clearTimeout(toastTimer);
+  $("#toast").classList.add("hidden");
+  $("#toastTitle").textContent = "Ошибка";
+  $("#toastMsg").textContent = "—";
+}
 
 function setAuthed(isAuthed) {
   $("#grid")?.classList.toggle("hidden", !isAuthed);
@@ -75,8 +134,146 @@ function setAuthed(isAuthed) {
   $("#closeSettingsBtn")?.classList.toggle("hidden", !isAuthed);
 }
 
+async function openDrilldownModalFromGroupRow(filters) {
+  openModal("Query");
+
+  drillModal = {
+    offset: 0,
+    limit: 50,
+    sort_by: [{ field: "updated_at", dir: "desc" }],
+    total: null,
+    cols: null,
+    rows: [],
+    filters: { ...filters },
+  };
+
+  $("#modalBody").innerHTML = "";
+
+  const meta = document.createElement("div");
+  meta.className = "muted";
+  meta.id = "drillMeta";
+  meta.textContent = "Загрузка…";
+  modalAppendNode(meta);
+
+  const wrap = document.createElement("div");
+  wrap.className = "tableWrap";
+  wrap.style.marginTop = "10px";
+  wrap.id = "drillWrap";
+  modalAppendNode(wrap);
+
+  const table = document.createElement("table");
+  table.id = "drillTable";
+  wrap.appendChild(table);
+
+  const bottom = document.createElement("div");
+  bottom.style.marginTop = "12px";
+  bottom.style.display = "flex";
+  bottom.style.justifyContent = "center";
+
+  const moreBtn = document.createElement("button");
+  moreBtn.className = "small";
+  moreBtn.id = "drillMoreBtn";
+  moreBtn.textContent = "↓";
+  bottom.appendChild(moreBtn);
+  modalAppendNode(bottom);
+
+  moreBtn.onclick = async () => {
+    drillModal.offset += drillModal.limit;
+    await drillModalAppend();
+  };
+
+  await drillModalAppend();
+}
+
+async function drillModalAppend() {
+  const payload = {
+    table: state.tableName,
+    filters: drillModal.filters,
+    limit: drillModal.limit,
+    offset: drillModal.offset,
+    sort_by: drillModal.sort_by,
+  };
+
+  const data = await apiFetch("/read/query", { method: "POST", body: payload });
+  const decoded = deepDecode(data);
+  const arr = normalizeToArray(decoded);
+
+  const count = decoded?.count ?? arr.length;
+  const total = decoded?.total ?? null;
+  drillModal.total = total;
+
+  const { page, pages } = computePageText(total, drillModal.offset, drillModal.limit);
+  const pageText = pages ? ` • page ${page}/${pages}` : ` • page ${page}/—`;
+
+  $("#drillMeta").textContent =
+    total == null
+      ? `offset: ${drillModal.offset} • count: ${count}${pageText}`
+      : `offset: ${drillModal.offset} • count: ${count} / total: ${total}${pageText}`;
+
+  if (!arr.length) {
+    const btn = $("#drillMoreBtn");
+    btn.disabled = true;
+    btn.textContent = "—";
+    modalCurrentText = JSON.stringify({ table: state.tableName, filters: drillModal.filters, results: drillModal.rows, total: drillModal.total }, null, 2);
+    return;
+  }
+
+  drillModal.rows.push(...arr);
+
+  const table = $("#drillTable");
+  if (!drillModal.cols) {
+    drillModal.cols = pickColumns(arr, "query");
+
+    const thead = document.createElement("thead");
+    const trh = document.createElement("tr");
+    drillModal.cols.forEach((c) => {
+      const th = document.createElement("th");
+      th.textContent = c;
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+
+    const tbody = document.createElement("tbody");
+    tbody.id = "drillTbody";
+    table.appendChild(thead);
+    table.appendChild(tbody);
+  }
+
+  const tbody = $("#drillTbody");
+  arr.forEach((row) => {
+    const tr = document.createElement("tr");
+    drillModal.cols.forEach((c) => {
+      const td = document.createElement("td");
+      const text = toDisplayString(row?.[c], c);
+      td.classList.add("cellClickable");
+      if (text.length > MAX_CELL) {
+        td.classList.add("cellTrunc");
+        td.textContent = text.slice(0, MAX_CELL) + "…";
+      } else {
+        td.textContent = text;
+      }
+      td.onclick = (e) => { e.stopPropagation(); openModal(c); modalSetPre(text); };
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+
+  const btn = $("#drillMoreBtn");
+  if (drillModal.total != null && (drillModal.offset + drillModal.limit) >= drillModal.total) {
+    btn.disabled = true;
+    btn.textContent = "✓";
+  }
+
+  $("#drillWrap").scrollTop = $("#drillWrap").scrollHeight;
+
+  modalCurrentText = JSON.stringify(
+    { table: state.tableName, filters: drillModal.filters, results: drillModal.rows, total: drillModal.total },
+    null, 2
+  );
+}
+
 // ---------- API ----------
-async function apiFetch(path, { method = "GET", body = null } = {}) {
+async function apiFetch(path, { method = "GET", body = null, noToast = false } = {}) {
   if (!state.apiKey) throw new Error("Нужен ключ");
 
   const opts = {
@@ -96,8 +293,12 @@ async function apiFetch(path, { method = "GET", body = null } = {}) {
   catch { data = { raw: text }; }
 
   if (!res.ok) {
-    const msg = (data && (data.detail || data.error)) ? (data.detail || data.error) : `${res.status} ${res.statusText}`;
-    throw new Error(msg);
+    const detail = (data && (data.detail || data.error)) ? (data.detail || data.error) : (text || `${res.status} ${res.statusText}`);
+    const err = new Error(detail);
+    err.status = res.status;
+    err.detail = detail;
+    if (!noToast) showToast(`Ошибка ${res.status}`, String(detail || "—"));
+    throw err;
   }
   return data;
 }
@@ -213,34 +414,6 @@ function tryFormatTimestamp(value) {
   return state.localTime ? formatLocalDate(dt) : formatUTCDate(dt);
 }
 
-function syncDraftsFromGroups(mode) {
-  const groups = getGroups(mode);
-  const g0 = Array.isArray(groups?.[0]) ? groups[0] : [];
-
-  const nextDrafts = [];
-  for (const c of g0) {
-    const field = (c?.field || "").trim();
-    if (!field) continue;
-
-    const op = (c?.op || "=").toLowerCase();
-    if (op === "=") {
-      if (c.value === undefined || c.value === null) {
-        nextDrafts.push({ id: state.draftSeq++, field, value: String(c.value ?? "") });
-      } else {
-        nextDrafts.push({ id: state.draftSeq++, field, value: String(c.value) });
-      }
-    } else if (op === "in") {
-      const arr = Array.isArray(c.value) ? c.value : [c.value];
-      for (const v of arr) {
-        nextDrafts.push({ id: state.draftSeq++, field, value: String(v ?? "") });
-      }
-    }
-  }
-
-  if (!nextDrafts.length) nextDrafts.push({ id: state.draftSeq++, field: "", value: "" });
-  setDrafts(mode, nextDrafts);
-}
-
 // ---------- Schema helpers ----------
 function getSchema() { return state.tables[state.tableName] || {}; }
 
@@ -251,111 +424,30 @@ function entityFields(schema) {
   }));
 }
 
-function getDrafts(mode) {
-  return mode === "query" ? state.queryDrafts : state.historyDrafts;
-}
-function setDrafts(mode, drafts) {
-  if (mode === "query") state.queryDrafts = drafts;
-  else state.historyDrafts = drafts;
-}
+function schemaHasField(schema, name) {
+  const n = String(name || "");
+  const lists = []
+    .concat(schema?.entity_fields || [])
+    .concat(schema?.data_fields || [])
+    .concat(schema?.search_fields || []);
+  if (lists.some(f => f?.name === n)) return true;
 
-// Quick всегда пишет только в groups[0], advanced (groups[1..]) не трогаем
-function rebuildGroup0FromDrafts(mode) {
-  const drafts = getDrafts(mode);
+  // entity_fields (у тебя отдельной функцией)
+  if ((schema?.entity_fields || []).some(f => f?.name === n)) return true;
 
-  // соберём значения по полям
-  const byField = new Map(); // field -> array(values)
-  for (const d of drafts) {
-    const f = (d.field || "").trim();
-    const vRaw = (d.value ?? "");
-    const v = String(vRaw).trim();
-    if (!f || v === "") continue;
+  // change/used counts (виртуальные поля)
+  const cc = changeCountName(schema);
+  const uc = usedCountName(schema);
+  if (cc && cc === n) return true;
+  if (uc && uc === n) return true;
 
-    if (!byField.has(f)) byField.set(f, []);
-    byField.get(f).push(v);
-  }
+  // иногда entity_fields приходят в schema.entity_fields и в entityFields(schema) одинаково,
+  // но оставим подстраховку:
+  if (entityFields(schema).some(f => f?.name === n)) return true;
 
-  const groups = getGroups(mode);
-  if (!groups.length) groups.push([]);
-
-  // ✅ сохраняем advanced-условия из group0 (те, что НЕ "=" и НЕ "in")
-  const prev = Array.isArray(groups[0]) ? groups[0] : [];
-  const preserved = prev.filter(c => {
-    const op = (c?.op || "=").toLowerCase();
-    return op !== "=" && op !== "in";
-  });
-
-  const quickConds = [];
-  for (const [field, vals] of byField.entries()) {
-    // unique values
-    const uniq = [];
-    for (const x of vals) {
-      if (!uniq.some(u => String(u) === String(x))) uniq.push(x);
-    }
-    if (uniq.length === 1) quickConds.push({ field, op: "=", value: uniq[0] });
-    else quickConds.push({ field, op: "in", value: uniq });
-  }
-
-  groups[0] = [...preserved, ...quickConds];
-  setGroups(mode, groups);
+  return false;
 }
 
-function valuesEqualLoosely(a, b) {
-  return String(a ?? "") === String(b ?? "");
-}
-
-function addOrMergeConditionAsIn(mode, field, rawValue) {
-  const schema = getSchema();
-  const meta = getFieldMeta(schema, mode);
-  const t = (meta.get(field) || "").toUpperCase();
-
-  // храним в groups сырое (строка) — типизацию делаем на отправке, но "in" может быть массивом строк
-  const v = String(rawValue ?? "").trim();
-  if (!field || !v) return;
-
-  const groups = getGroups(mode);
-  if (!groups.length) groups.push([]);
-  if (!groups[0]) groups[0] = [];
-
-  // ищем существующее условие по этому полю только в первой группе (quick = group0 AND)
-  const g0 = groups[0];
-  const idx = g0.findIndex(c => (c?.field || "") === field);
-
-  if (idx === -1) {
-    g0.push({ field, op: "=", value: v });
-    setGroups(mode, groups);
-    return;
-  }
-
-  const existing = g0[idx];
-
-  // если уже "=" -> превращаем в in [old, new]
-  if ((existing.op || "=") === "=") {
-    const oldV = String(existing.value ?? "").trim();
-    if (valuesEqualLoosely(oldV, v)) return; // не дублируем
-    g0[idx] = { field, op: "in", value: [oldV, v] };
-    setGroups(mode, groups);
-    return;
-  }
-
-  // если уже "in" -> добавляем в массив
-  if ((existing.op || "") === "in") {
-    let arr = existing.value;
-    if (!Array.isArray(arr)) arr = [String(arr ?? "").trim()].filter(Boolean);
-    if (!arr.some(x => valuesEqualLoosely(x, v))) arr.push(v);
-    g0[idx] = { field, op: "in", value: arr };
-    setGroups(mode, groups);
-    return;
-  }
-
-  // если было != или сравнения — просто добавим ещё одно условие (AND)
-  g0.push({ field, op: "=", value: v });
-  setGroups(mode, groups);
-}
-function baseFilterFields(schema) {
-  // fields renamed -> search_fields
-  return [...(schema.entity_fields || []), ...(schema.search_fields || []), ...(schema.data_fields || [])];
-}
 function changeCountName(schema) {
   if (schema.field_change_count === true && schema.field_change_count_name) return schema.field_change_count_name;
   return null;
@@ -368,21 +460,14 @@ function usedCountName(schema) {
 function filterFieldsForMode(schema, mode) {
   const out = [];
 
-  // Query/History: entity_fields should be available in filters
-  if (mode === "query" || mode === "history") {
-    out.push(...(schema.entity_fields || []));
-  }
-
-  // search + data
+  if (mode === "query" || mode === "history") out.push(...(schema.entity_fields || []));
   out.push(...(schema.search_fields || []), ...(schema.data_fields || []));
 
-  // dynamic counters
   const cc = changeCountName(schema);
   const uc = usedCountName(schema);
   if (cc && (mode === "query" || mode === "get")) out.push({ name: cc, type: "INTEGER" });
   if (uc) out.push({ name: uc, type: "INTEGER" });
 
-  // de-dup by name (keep first type)
   const seen = new Set();
   const dedup = [];
   for (const f of out) {
@@ -398,7 +483,6 @@ function writeMode(schema) {
   const wm = (schema.write_mode || "").toLowerCase().trim();
   if (wm === "scd" || wm === "current" || wm === "append") return wm;
 
-  // fallback old
   const cur = schema.current !== false;
   const his = schema.history !== false;
   if (cur && his) return "scd";
@@ -412,23 +496,33 @@ function applyTableCapabilities(schema) {
   const showQueryGet = (wm === "scd" || wm === "current");
   const showHistory = (wm === "scd" || wm === "append");
 
-  // Containers should exist in HTML (blkQuery/blkGet/blkHistory).
-  // If you didn't add them yet, it still works with heads.
-  const bq = $("#blkQuery"), bg = $("#blkGet"), bh = $("#blkHistory");
-  if (bq && bg && bh) {
-    bq.classList.toggle("hidden", !showQueryGet);
-    bg.classList.toggle("hidden", !showQueryGet);
-    bh.classList.toggle("hidden", !showHistory);
-  } else {
-    $("#queryHead")?.classList.toggle("hidden", !showQueryGet);
-    $("#getHead")?.classList.toggle("hidden", !showQueryGet);
-    $("#historyHead")?.classList.toggle("hidden", !showHistory);
-  }
+  $("#blkQuery")?.classList.toggle("hidden", !showQueryGet);
+  $("#blkGet")?.classList.toggle("hidden", !showQueryGet);
+  $("#blkHistory")?.classList.toggle("hidden", !showHistory);
 
   $("#querySection").classList.add("hidden"); $("#toggleQueryBtn").textContent = "▸";
   $("#getSection").classList.add("hidden"); $("#toggleGetBtn").textContent = "▸";
   $("#historySection").classList.add("hidden"); $("#toggleHistoryBtn").textContent = "▸";
 
+  // Group: GROUP BY & AGGS toggle
+  $("#toggleGroupGaBtn").onclick = () => {
+    state.groupGaOpen = !state.groupGaOpen;
+    $("#groupGaSection").classList.toggle("hidden", !state.groupGaOpen);
+    $("#toggleGroupGaBtn").textContent = state.groupGaOpen ? "GROUP BY & AGGS ▾" : "GROUP BY & AGGS ▸";
+  };
+
+  // reset inner filter sections to hidden (no double-click bug)
+  state.filtersOpen = false;
+  state.historyFiltersOpen = false;
+  $("#filtersSection").classList.add("hidden");
+  $("#historyFiltersSection").classList.add("hidden");
+  $("#toggleFiltersBtn").textContent = "Фильтры ▸";
+  $("#toggleHistoryFiltersBtn").textContent = "Фильтры ▸";
+  $("#toggleGroupGaBtn").textContent = "GROUP BY & AGGS ▾";
+
+
+
+  // endpoint
   if (wm === "append") {
     $("#historySection").classList.remove("hidden");
     $("#toggleHistoryBtn").textContent = "▾";
@@ -436,9 +530,12 @@ function applyTableCapabilities(schema) {
   } else {
     state.listEndpoint = "/read/query";
   }
+
+  //   $("#blkGroup")?.classList.remove("hidden");
+  // ensureGroupDefaults();
 }
 
-// ---------- types ----------
+// ---------- Types ----------
 function getFieldMeta(schema, mode) {
   const m = new Map();
   const all = filterFieldsForMode(schema, mode);
@@ -454,40 +551,209 @@ function getFieldMeta(schema, mode) {
 function isIntType(t) { return t === "INTEGER" || t === "BIGINT"; }
 function isFloatType(t) { return t === "FLOAT" || t === "DOUBLE" || t === "NUMERIC"; }
 
-// ---------- Filter Builder UI (Query/History) ----------
+// ---------- Filter Builder state ----------
 function ensureGroups(mode) {
   if (mode === "query") {
     if (!Array.isArray(state.queryGroups) || !state.queryGroups.length) state.queryGroups = [[]];
-  } else {
+    return;
+  }
+  if (mode === "history") {
     if (!Array.isArray(state.historyGroups) || !state.historyGroups.length) state.historyGroups = [[]];
+    return;
+  }
+  if (mode === "group_filters") {
+    if (!Array.isArray(state.groupFiltersGroups) || !state.groupFiltersGroups.length) state.groupFiltersGroups = [[]];
+    return;
+  }
+  if (mode === "group_having") {
+    if (!Array.isArray(state.groupHavingGroups) || !state.groupHavingGroups.length) state.groupHavingGroups = [[]];
+    return;
   }
 }
 
 function getGroups(mode) {
   ensureGroups(mode);
-  return mode === "query" ? state.queryGroups : state.historyGroups;
+  if (mode === "query") return state.queryGroups;
+  if (mode === "history") return state.historyGroups;
+  if (mode === "group_filters") return state.groupFiltersGroups;
+  if (mode === "group_having") return state.groupHavingGroups;
+  return [[]];
 }
+
 function setGroups(mode, groups) {
   if (mode === "query") state.queryGroups = groups;
-  else state.historyGroups = groups;
+  else if (mode === "history") state.historyGroups = groups;
+  else if (mode === "group_filters") state.groupFiltersGroups = groups;
+  else if (mode === "group_having") state.groupHavingGroups = groups;
+}
+function getDrafts(mode) {
+  if (mode === "query") return state.queryDrafts;
+  if (mode === "history") return state.historyDrafts;
+  if (mode === "group_filters") return state.groupFilterDrafts;
+  if (mode === "group_having") return state.groupHavingDrafts;
+  return [];
+}
+function setDrafts(mode, drafts) {
+  if (mode === "query") state.queryDrafts = drafts;
+  else if (mode === "history") state.historyDrafts = drafts;
+  else if (mode === "group_filters") state.groupFilterDrafts = drafts;
+  else if (mode === "group_having") state.groupHavingDrafts = drafts;
+}
+// ---------- Filter UI (Quick + Advanced + Presets) ----------
+function injectFilterStyles() {
+  if (document.getElementById("fqStyle")) return;
+  const st = document.createElement("style");
+  st.id = "fqStyle";
+  st.textContent = `
+    .fqQuick{display:flex; flex-direction:column; gap:10px; margin-top:6px;}
+    .fqRow{
+      display:grid;
+      grid-template-columns: 1.1fr 1.6fr auto;
+      gap:8px;
+      align-items:center;
+    }
+    .fqBtn{width:auto; padding:8px 10px; border-radius:10px;}
+    .fqChips{display:flex; flex-wrap:wrap; gap:8px;}
+    .fqChip{
+      display:flex; gap:8px; align-items:center;
+      border:1px solid var(--line,#1f2630);
+      background:#0f1318;
+      border-radius:999px;
+      padding:6px 8px;
+    }
+    .fqChipTxt{font-size:12px; opacity:.95;}
+    .fqX{width:auto; padding:2px 8px; border-radius:999px;}
+    .fqAdvWrap{margin-top:10px;}
+    .fqAdvTop{display:flex; gap:8px; flex-wrap:wrap;}
+    .fqAdvBody{margin-top:10px;}
+    .fqQuick select, .fqQuick input,
+    .fbRow select, .fbRow input {
+      width: 100%;
+      border: 1px solid var(--line,#1f2630);
+      background: #0f1318;
+      color: inherit;
+      border-radius: 12px;
+      padding: 10px 12px;
+      outline: none;
+    }
+    .fqQuick select, .fbRow select {
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, var(--muted,#7f8a99) 50%),
+        linear-gradient(135deg, var(--muted,#7f8a99) 50%, transparent 50%);
+      background-position:
+        calc(100% - 18px) 52%,
+        calc(100% - 12px) 52%;
+      background-size: 6px 6px, 6px 6px;
+      background-repeat: no-repeat;
+      padding-right: 34px;
+    }
+    @media (max-width:720px){
+      .fqRow{ grid-template-columns: 1fr 1fr auto; }
+      .fqBtn{width:auto;}
+    }
+    .psetBox{display:flex; flex-direction:column; gap:10px;}
+    .psetRow{
+      display:flex; gap:10px; align-items:flex-start;
+      padding:10px; border:1px solid var(--line,#1f2630);
+      border-radius:12px; background:#0f1318;
+      cursor:pointer;
+    }
+    .psetRow:hover{filter:brightness(1.05);}
+    .psetChk{
+      width:18px; height:18px;
+      border:1px solid var(--line,#1f2630);
+      border-radius:6px;
+      background:#0b0e13;
+      display:flex; align-items:center; justify-content:center;
+      margin-top:2px; flex:0 0 auto;
+    }
+    .psetChk.on{
+      background:linear-gradient(180deg,#1a2431,#121a24);
+      border-color:#2b3a52;
+    }
+    .psetChk.on:after{
+      content:"";
+      width:10px; height:10px;
+      border-radius:3px;
+      background:#e6eefc;
+      opacity:.95;
+    }
+    .psetText{display:flex; flex-direction:column; gap:2px;}
+    .psetTitle{font-weight:800;}
+    .psetDesc{color:var(--muted,#7f8a99); font-size:12px; line-height:1.25;}
+  `;
+  document.head.appendChild(st);
 }
 
-function createEl(tag, cls, txt) {
-  const el = document.createElement(tag);
-  if (cls) el.className = cls;
-  if (txt !== undefined) el.textContent = txt;
-  return el;
+function syncDraftsFromGroups(mode) {
+  const groups = getGroups(mode);
+  const g0 = Array.isArray(groups?.[0]) ? groups[0] : [];
+
+  const nextDrafts = [];
+  for (const c of g0) {
+    const field = (c?.field || "").trim();
+    if (!field) continue;
+
+    const op = (c?.op || "=").toLowerCase();
+    if (op === "=") {
+      nextDrafts.push({ id: state.draftSeq++, field, value: String(c.value ?? "") });
+    } else if (op === "in") {
+      const arr = Array.isArray(c.value) ? c.value : [c.value];
+      for (const v of arr) nextDrafts.push({ id: state.draftSeq++, field, value: String(v ?? "") });
+    }
+  }
+
+  if (!nextDrafts.length) nextDrafts.push({ id: state.draftSeq++, field: "", value: "" });
+  setDrafts(mode, nextDrafts);
 }
 
-function buildFilterUI(mode, containerId) {
+function rebuildGroup0FromDrafts(mode) {
+  const drafts = getDrafts(mode);
+
+  const byField = new Map();
+  for (const d of drafts) {
+    const f = (d.field || "").trim();
+    const v = String(d.value ?? "").trim();
+    if (!f || v === "") continue;
+    if (!byField.has(f)) byField.set(f, []);
+    byField.get(f).push(v);
+  }
+
+  const groups = getGroups(mode);
+  if (!groups.length) groups.push([]);
+
+  // preserve advanced conditions in group0 that are not "=" or "in"
+  const prev = Array.isArray(groups[0]) ? groups[0] : [];
+  const preserved = prev.filter(c => {
+    const op = (c?.op || "=").toLowerCase();
+    return op !== "=" && op !== "in";
+  });
+
+  const quickConds = [];
+  for (const [field, vals] of byField.entries()) {
+    const uniq = [];
+    for (const x of vals) if (!uniq.some(u => String(u) === String(x))) uniq.push(x);
+
+    if (uniq.length === 1) quickConds.push({ field, op: "=", value: uniq[0] });
+    else quickConds.push({ field, op: "in", value: uniq });
+  }
+
+  groups[0] = [...preserved, ...quickConds];
+  setGroups(mode, groups);
+}
+
+function buildFilterUI(mode, containerId, customFields = null, opts = {}) {
+  const { showPresets = true } = opts;
   const schema = getSchema();
-  const fields = filterFieldsForMode(schema, mode);
+  const fields = customFields || filterFieldsForMode(schema, (mode === "group_filters" ? (state.groupIsHistory ? "history" : "query") :
+                                      mode === "group_having" ? (state.groupIsHistory ? "history" : "query") : mode));
   const box = document.getElementById(containerId);
   box.textContent = "";
-
   injectFilterStyles();
 
-  // ensure at least 1 row
   let drafts = getDrafts(mode);
   if (!Array.isArray(drafts) || !drafts.length) {
     drafts = [{ id: state.draftSeq++, field: "", value: "" }];
@@ -512,7 +778,6 @@ function buildFilterUI(mode, containerId) {
       const row = document.createElement("div");
       row.className = "fqRow";
 
-      // field select
       const fieldSel = document.createElement("select");
       fieldSel.className = "fqField";
       const opt0 = document.createElement("option");
@@ -527,13 +792,11 @@ function buildFilterUI(mode, containerId) {
       });
       fieldSel.value = d.field || "";
 
-      // value input
       const valInp = document.createElement("input");
       valInp.className = "fqVal";
       valInp.placeholder = "Значение";
       valInp.value = d.value ?? "";
 
-      // right button: last => "+", others => "×"
       const btn = document.createElement("button");
       btn.className = "small fqBtn";
       btn.textContent = isLast ? "+" : "×";
@@ -543,7 +806,6 @@ function buildFilterUI(mode, containerId) {
           const next = [...drafts, { id: state.draftSeq++, field: "", value: "" }];
           setDrafts(mode, next);
           render();
-          // без автофокуса (чтобы не раздражало на мобиле)
         };
       } else {
         btn.onclick = () => {
@@ -555,13 +817,10 @@ function buildFilterUI(mode, containerId) {
         };
       }
 
-      // auto-apply debounce (НЕ очищаем value)
       let timer = null;
       const scheduleApply = () => {
         clearTimeout(timer);
-        timer = setTimeout(() => {
-          rebuildGroup0FromDrafts(mode);
-        }, 200);
+        timer = setTimeout(() => rebuildGroup0FromDrafts(mode), 200);
       };
 
       fieldSel.onchange = () => {
@@ -604,12 +863,16 @@ function buildFilterUI(mode, containerId) {
   advBtn.className = "small";
   advBtn.textContent = "Расширенные ▸";
 
-  const presetsBtn = document.createElement("button");
-  presetsBtn.className = "small";
-  presetsBtn.textContent = "Сохранённые";
+  let presetsBtn = null;
+  if (showPresets) {
+    presetsBtn = document.createElement("button");
+    presetsBtn.className = "small";
+    presetsBtn.textContent = "Сохранённые";
+    presetsBtn.onclick = () => openPresetsModal(mode);
+  }
 
-  advTop.appendChild(advBtn);
-  advTop.appendChild(presetsBtn);
+    advTop.appendChild(advBtn);
+  if (presetsBtn) advTop.appendChild(presetsBtn);
   advWrap.appendChild(advTop);
 
   const advBody = document.createElement("div");
@@ -626,145 +889,10 @@ function buildFilterUI(mode, containerId) {
     }
   };
 
-  presetsBtn.onclick = () => openPresetsModal(mode);
-
   box.appendChild(advWrap);
 
-  // initial render + initial apply
   render();
   rebuildGroup0FromDrafts(mode);
-}
-
-function injectFilterStyles() {
-  if (document.getElementById("fqStyle")) return;
-  const st = document.createElement("style");
-  st.id = "fqStyle";
-  st.textContent = `
-    /* quick */
-    .fqQuick{display:flex; flex-direction:column; gap:10px; margin-top:6px;}
-    .fqRow{
-      display:grid;
-      grid-template-columns: 1.1fr 1.6fr auto;
-      gap:8px;
-      align-items:center;
-    }
-    .fqBtn{width:auto; padding:8px 10px; border-radius:10px;}
-
-    .fqChips{display:flex; flex-wrap:wrap; gap:8px;}
-    .fqChip{
-      display:flex; gap:8px; align-items:center;
-      border:1px solid var(--line,#1f2630);
-      background:#0f1318;
-      border-radius:999px;
-      padding:6px 8px;
-    }
-    .fqChipTxt{font-size:12px; opacity:.95;}
-    .fqX{width:auto; padding:2px 8px; border-radius:999px;}
-
-    .fqAdvWrap{margin-top:10px;}
-    .fqAdvTop{display:flex; gap:8px; flex-wrap:wrap;}
-    .fqAdvBody{margin-top:10px;}
-
-    /* ✅ select styling (как input) */
-    .fqQuick select, .fqQuick input,
-    .fbRow select, .fbRow input {
-      width: 100%;
-      border: 1px solid var(--line,#1f2630);
-      background: #0f1318;
-      color: inherit;
-      border-radius: 12px;
-      padding: 10px 12px;
-      outline: none;
-    }
-    .fqQuick select, .fbRow select {
-      appearance: none;
-      -webkit-appearance: none;
-      -moz-appearance: none;
-      background-image:
-        linear-gradient(45deg, transparent 50%, var(--muted,#7f8a99) 50%),
-        linear-gradient(135deg, var(--muted,#7f8a99) 50%, transparent 50%);
-      background-position:
-        calc(100% - 18px) 52%,
-        calc(100% - 12px) 52%;
-      background-size: 6px 6px, 6px 6px;
-      background-repeat: no-repeat;
-      padding-right: 34px;
-    }
-
-    /* ✅ mobile: поле слева, значение справа (не вертикально) */
-    @media (max-width:720px){
-      .fqRow{
-        grid-template-columns: 1fr 1fr auto;
-      }
-      .fqBtn{width:auto;}
-    }
-    
-    /* preset settings */
-    .psetBox{display:flex; flex-direction:column; gap:10px;}
-    .psetRow{
-      display:flex;
-      gap:10px;
-      align-items:flex-start;
-      padding:10px;
-      border:1px solid var(--line,#1f2630);
-      border-radius:12px;
-      background:#0f1318;
-      cursor:pointer;
-    }
-    .psetRow:hover{filter:brightness(1.05);}
-    .psetChk{
-      width:18px; height:18px;
-      border:1px solid var(--line,#1f2630);
-      border-radius:6px;
-      background:#0b0e13;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      margin-top:2px;
-      flex:0 0 auto;
-    }
-    .psetChk.on{
-      background:linear-gradient(180deg,#1a2431,#121a24);
-      border-color:#2b3a52;
-    }
-    .psetChk.on:after{
-      content:"";
-      width:10px; height:10px;
-      border-radius:3px;
-      background:#e6eefc;
-      opacity:.95;
-    }
-    .psetText{display:flex; flex-direction:column; gap:2px;}
-    .psetTitle{font-weight:800;}
-    .psetDesc{color:var(--muted,#7f8a99); font-size:12px; line-height:1.25;}
-    
-    /* ✅ global select/input styling (включая sortSelect) */
-    select, input {
-      border: 1px solid var(--line,#1f2630);
-      background: #0f1318;
-      color: inherit;
-      border-radius: 12px;
-      padding: 10px 12px;
-      outline: none;
-    }
-    
-    /* ✅ select стрелка */
-    select {
-      appearance: none;
-      -webkit-appearance: none;
-      -moz-appearance: none;
-      background-image:
-        linear-gradient(45deg, transparent 50%, var(--muted,#7f8a99) 50%),
-        linear-gradient(135deg, var(--muted,#7f8a99) 50%, transparent 50%);
-      background-position:
-        calc(100% - 18px) 52%,
-        calc(100% - 12px) 52%;
-      background-size: 6px 6px, 6px 6px;
-      background-repeat: no-repeat;
-      padding-right: 34px;
-    }
-  `;
-  document.head.appendChild(st);
 }
 
 function buildAdvancedBuilder(mode, containerEl) {
@@ -772,7 +900,6 @@ function buildAdvancedBuilder(mode, containerEl) {
   const fields = filterFieldsForMode(schema, mode);
   const groups = getGroups(mode);
 
-  // стили для advanced (один раз)
   if (!document.getElementById("fbStyle2")) {
     const st = document.createElement("style");
     st.id = "fbStyle2";
@@ -797,15 +924,9 @@ function buildAdvancedBuilder(mode, containerEl) {
   const addOr = document.createElement("button");
   addOr.className = "small fbBtn";
   addOr.textContent = "+ OR";
-  const clearAll = document.createElement("button");
-  clearAll.className = "small fbBtn";
-  clearAll.textContent = "Очистить";
 
   top.appendChild(addOr);
-  top.appendChild(clearAll);
   containerEl.appendChild(top);
-
-  const fieldOptions = fields.map(f => ({ name: f.name, type: (f.type || "").toString().toUpperCase().trim() }));
 
   const rerender = () => buildAdvancedBuilder(mode, containerEl);
 
@@ -815,10 +936,8 @@ function buildAdvancedBuilder(mode, containerEl) {
     setGroups(mode, g);
     rerender();
   };
-  clearAll.onclick = () => {
-    setGroups(mode, [[]]);
-    rerender();
-  };
+
+  const fieldOptions = fields.map(f => ({ name: f.name }));
 
   groups.forEach((grp, gi) => {
     if (gi > 0) {
@@ -953,8 +1072,101 @@ function buildAdvancedBuilder(mode, containerEl) {
   });
 }
 
+// ---------- Presets (per-table + per-mode) ----------
+function presetsLoadAll() {
+  try { return JSON.parse(localStorage.getItem(LS_PRESETS) || "{}"); }
+  catch { return {}; }
+}
+function presetsSaveAll(obj) {
+  localStorage.setItem(LS_PRESETS, JSON.stringify(obj || {}));
+}
+function presetsKey(table, mode) {
+  return `${table}::${mode}`; // mode: "query" or "history"
+}
+function presetsList(table, mode) {
+  const all = presetsLoadAll();
+  const k = presetsKey(table, mode);
+  return Array.isArray(all[k]) ? all[k] : [];
+}
+function groupHavingAllowedFields() {
+  const set = new Set();
+  (state.groupBy || []).forEach(x => set.add(String(x)));
+  Object.keys(state.groupAggs || {}).forEach(k => set.add(String(k)));
+  return [...set].map(name => ({ name, type: "TEXT" })); // типы тут не важны, having чаще по числам agg; мы ниже для numeric все равно parse try
+}
+function presetsUpsert(table, mode, name, payload, opts = {}) {
+  const all = presetsLoadAll();
+  const k = presetsKey(table, mode);
+  const arr = Array.isArray(all[k]) ? all[k] : [];
+  const cleanName = (name || "").trim();
+  if (!cleanName) throw new Error("Нужно имя");
+
+  const item = {
+    name: cleanName,
+    groups: payload.groups || [[]],
+    fields: payload.fields || [],
+    sort_by: payload.sort_by || [],
+    autoRun: !!opts.autoRun,
+  };
+
+  const idx = arr.findIndex(x => (x?.name || "") === cleanName);
+  if (idx >= 0) arr[idx] = item;
+  else arr.push(item);
+
+  all[k] = arr;
+  presetsSaveAll(all);
+}
+function presetsRemove(table, mode, name) {
+  const all = presetsLoadAll();
+  const k = presetsKey(table, mode);
+  const arr = Array.isArray(all[k]) ? all[k] : [];
+  all[k] = arr.filter(x => (x?.name || "") !== name);
+  presetsSaveAll(all);
+}
+
+function packGroupPreset() {
+  return {
+    groupIsHistory: !!state.groupIsHistory,
+    groupBy: [...(state.groupBy || [])],
+    groupAggs: deepDecode(state.groupAggs || {}),
+    groupSortBy: [...(state.groupSortBy || [])],
+
+    filtersGroups: getGroups("group_filters"),
+    havingGroups: getGroups("group_having"),
+
+    limit: Number($("#groupLimitInput").value || 100),
+    offset: Number($("#groupOffsetInput").value || 0),
+
+    autoRun: false,
+  };
+}
+
+function applyGroupPreset(p) {
+  state.groupIsHistory = !!p.groupIsHistory;
+  state.groupBy = Array.isArray(p.groupBy) && p.groupBy.length ? p.groupBy : state.groupBy;
+  state.groupAggs = (p.groupAggs && typeof p.groupAggs === "object") ? p.groupAggs : state.groupAggs;
+  state.groupSortBy = Array.isArray(p.groupSortBy) && p.groupSortBy.length ? p.groupSortBy : state.groupSortBy;
+
+  setGroups("group_filters", Array.isArray(p.filtersGroups) && p.filtersGroups.length ? p.filtersGroups : [[]]);
+  setGroups("group_having", Array.isArray(p.havingGroups) && p.havingGroups.length ? p.havingGroups : [[]]);
+
+  syncDraftsFromGroups("group_filters");
+  syncDraftsFromGroups("group_having");
+
+  $("#groupLimitInput").value = String(p.limit ?? 100);
+  $("#groupOffsetInput").value = String(p.offset ?? 0);
+
+  // rebuild UIs
+  buildGroupIsHistoryToggle();
+  buildGroupByUI();
+  buildAggsUI();
+  buildSortByUIGroup();
+  buildFilterUI("group_filters", "filtersBoxGroup", null, { showPresets: false });
+  buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+}
+
 function openPresetsModal(mode) {
-  openModal(mode === "query" ? "Сохранённые фильтры (Query)" : "Сохранённые фильтры (History)");
+  openModal(mode === "query" ? "Сохранённые (Query)" : "Сохранённые (History)");
 
   const wrap = document.createElement("div");
   wrap.style.display = "flex";
@@ -998,36 +1210,40 @@ function openPresetsModal(mode) {
       const loadBtn = document.createElement("button");
       loadBtn.className = "small primary";
       loadBtn.textContent = "Загрузить";
-      loadBtn.onclick = () => {
+      loadBtn.onclick = async () => {
         setGroups(mode, Array.isArray(it.groups) && it.groups.length ? it.groups : [[]]);
-
-        setGroups(mode, Array.isArray(it.groups) && it.groups.length ? it.groups : [[]]);
-
-        // всегда пересобираем quick из groups
         syncDraftsFromGroups(mode);
 
-        const cid = (mode === "query") ? "filtersBoxQuery" : "filtersBoxHistory";
-        buildFilterUI(mode, cid);
+        // fields + sort_by
+        if (mode === "query") {
+          state.queryFields = Array.isArray(it.fields) ? it.fields : [];
+          state.querySortBy = Array.isArray(it.sort_by) ? it.sort_by : [];
+        } else {
+          state.historyFields = Array.isArray(it.fields) ? it.fields : [];
+          state.historySortBy = Array.isArray(it.sort_by) ? it.sort_by : [];
+        }
 
-        // ✅ auto run
-        setTimeout(async () => {
-          try {
-            if (it.autoRun) {
-              if (mode === "query") {
-                $("#offsetInput").value = "0";
-                state.lastOffset = 0;
-                await runQuery();
-              } else {
-                $("#historyOffsetInput").value = "0";
-                state.lastOffset = 0;
-                await doHistory();
-              }
-            }
-            setStatus("OK");
-          } catch (e) {
-            setStatus(e.message);
+        // rebuild UIs
+        buildFilterUI(mode, mode === "query" ? "filtersBoxQuery" : "filtersBoxHistory");
+        ensureSortByInitialized(mode);
+        if (mode === "query") {
+          if (state.fieldsOpen) buildFieldsPicker("query", "fieldsBoxQuery");
+          if (state.sortByOpen) buildSortByUI("query", "sortByBoxQuery");
+        } else {
+          if (state.historyFieldsOpen) buildFieldsPicker("history", "fieldsBoxHistory");
+          if (state.historySortByOpen) buildSortByUI("history", "sortByBoxHistory");
+        }
+
+        // auto-run
+        try {
+          if (it.autoRun) {
+            if (mode === "query") { $("#offsetInput").value = "0"; state.lastOffset = 0; await runQuery(); }
+            else { $("#historyOffsetInput").value = "0"; state.lastOffset = 0; await doHistory(); }
           }
-        }, 0);
+          setStatus("OK");
+        } catch (e) {
+          setStatus(e.message);
+        }
 
         closeModal();
       };
@@ -1055,7 +1271,6 @@ function openPresetsModal(mode) {
     });
   }
 
-  // SAVE new preset (без чекбокса)
   const saveRow = document.createElement("div");
   saveRow.style.display = "flex";
   saveRow.style.gap = "8px";
@@ -1071,9 +1286,15 @@ function openPresetsModal(mode) {
   saveBtn.textContent = "Сохранить";
   saveBtn.onclick = () => {
     const nm = nameInp.value.trim();
-    const g = getGroups(mode);
-    // по умолчанию НЕ сохраняем drafts
-    presetsUpsert(state.tableName, mode, nm, g, { autoRun: false });
+    const groups = getGroups(mode);
+
+    const payload = {
+      groups,
+      fields: (mode === "query") ? state.queryFields : state.historyFields,
+      sort_by: (mode === "query") ? state.querySortBy : state.historySortBy,
+    };
+
+    presetsUpsert(state.tableName, mode, nm, payload, { autoRun: false });
     nameInp.value = "";
     renderList();
   };
@@ -1098,7 +1319,6 @@ function openPresetSettings(mode, presetName) {
   const box = document.createElement("div");
   box.className = "psetBox";
 
-  // helper to build a toggle row
   const addToggle = ({ key, title, desc, value }) => {
     const row = document.createElement("div");
     row.className = "psetRow";
@@ -1131,38 +1351,31 @@ function openPresetSettings(mode, presetName) {
 
     row.dataset.key = key;
     row.dataset.value = value ? "1" : "0";
-
     box.appendChild(row);
   };
 
-  // ✅ первая настройка (на будущее можно добавлять addToggle)
   addToggle({
     key: "autoRun",
     title: "Автозапуск после загрузки",
-    desc: mode === "query"
-      ? "После загрузки пресета автоматически выполнить Query."
-      : "После загрузки пресета автоматически выполнить History.",
+    desc: mode === "query" ? "После загрузки выполнить Query." : "После загрузки выполнить History.",
     value: !!it.autoRun,
   });
 
   const save = document.createElement("button");
   save.className = "small primary";
   save.textContent = "Сохранить";
-
   save.onclick = () => {
-    // собрать значения настроек
     const rows = box.querySelectorAll(".psetRow");
     const settings = {};
     rows.forEach(r => settings[r.dataset.key] = r.dataset.value === "1");
 
-    const groups = Array.isArray(it.groups) && it.groups.length ? it.groups : [[]];
-    const opts = {
-      autoRun: !!settings.autoRun,
+    const payload = {
+      groups: Array.isArray(it.groups) && it.groups.length ? it.groups : [[]],
+      fields: Array.isArray(it.fields) ? it.fields : [],
+      sort_by: Array.isArray(it.sort_by) ? it.sort_by : [],
     };
 
-    presetsUpsert(state.tableName, mode, presetName, groups, opts);
-
-    // вернёмся к списку
+    presetsUpsert(state.tableName, mode, presetName, payload, { autoRun: !!settings.autoRun });
     closeModal();
     openPresetsModal(mode);
   };
@@ -1171,13 +1384,200 @@ function openPresetSettings(mode, presetName) {
   modalAppendNode(save);
 }
 
-// parse value according to type + op
+function openGroupPresetsModal() {
+  openModal("Сохранённые (Group)");
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexDirection = "column";
+  wrap.style.gap = "10px";
+
+  const list = document.createElement("div");
+
+  function renderList() {
+    list.textContent = "";
+    const arr = presetsList(state.tableName, "group");
+    if (!arr.length) {
+      const m = document.createElement("div");
+      m.className = "muted";
+      m.textContent = "Нет сохранённых";
+      list.appendChild(m);
+      return;
+    }
+
+    arr.forEach((it) => {
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.gap = "8px";
+      row.style.alignItems = "center";
+      row.style.flexWrap = "wrap";
+      row.style.justifyContent = "space-between";
+      row.style.border = "1px solid var(--line,#1f2630)";
+      row.style.borderRadius = "12px";
+      row.style.padding = "10px";
+      row.style.background = "#0f1318";
+
+      const name = document.createElement("div");
+      name.style.fontWeight = "800";
+      name.textContent = it.name;
+
+      const btns = document.createElement("div");
+      btns.style.display = "flex";
+      btns.style.gap = "8px";
+      btns.style.flexWrap = "wrap";
+
+      const loadBtn = document.createElement("button");
+      loadBtn.className = "small primary";
+      loadBtn.textContent = "Загрузить";
+      loadBtn.onclick = async () => {
+        applyGroupPreset(it.payload || {});
+        closeModal();
+        if (it.autoRun) {
+          $("#groupOffsetInput").value = "0";
+          try { await doGroup(); setStatus("OK"); } catch (e) { setStatus(e.message); }
+        }
+      };
+
+      const settingsBtn = document.createElement("button");
+      settingsBtn.className = "small";
+      settingsBtn.textContent = "⚙";
+      settingsBtn.onclick = () => openGroupPresetSettings(it.name);
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "small";
+      delBtn.textContent = "Удалить";
+      delBtn.onclick = () => {
+        presetsRemove(state.tableName, "group", it.name);
+        renderList();
+      };
+
+      btns.appendChild(loadBtn);
+      btns.appendChild(settingsBtn);
+      btns.appendChild(delBtn);
+
+      row.appendChild(name);
+      row.appendChild(btns);
+      list.appendChild(row);
+    });
+  }
+
+  // save row
+  const saveRow = document.createElement("div");
+  saveRow.style.display = "flex";
+  saveRow.style.gap = "8px";
+  saveRow.style.flexWrap = "wrap";
+  saveRow.style.alignItems = "center";
+
+  const nameInp = document.createElement("input");
+  nameInp.placeholder = "Название";
+  nameInp.style.flex = "1";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "small primary";
+  saveBtn.textContent = "Сохранить";
+  saveBtn.onclick = () => {
+    const nm = nameInp.value.trim();
+    if (!nm) return;
+    const payload = packGroupPreset();
+    // сохраняем в presetsUpsert через groups-поле, но нам нужен payload:
+    presetsUpsertGroup(state.tableName, nm, payload, { autoRun: false });
+    nameInp.value = "";
+    renderList();
+  };
+
+  saveRow.appendChild(nameInp);
+  saveRow.appendChild(saveBtn);
+
+  wrap.appendChild(saveRow);
+  wrap.appendChild(list);
+
+  modalAppendNode(wrap);
+  renderList();
+}
+
+function presetsUpsertGroup(table, name, payload, opts = {}) {
+  const all = presetsLoadAll();
+  const k = presetsKey(table, "group");
+  const arr = Array.isArray(all[k]) ? all[k] : [];
+  const cleanName = (name || "").trim();
+  if (!cleanName) throw new Error("Нужно имя");
+
+  const item = {
+    name: cleanName,
+    payload: payload || {},
+    autoRun: !!opts.autoRun,
+  };
+
+  const idx = arr.findIndex(x => (x?.name || "") === cleanName);
+  if (idx >= 0) arr[idx] = item;
+  else arr.push(item);
+
+  all[k] = arr;
+  presetsSaveAll(all);
+}
+
+function openGroupPresetSettings(presetName) {
+  const arr = presetsList(state.tableName, "group");
+  const it = arr.find(x => (x?.name || "") === presetName);
+  if (!it) return;
+
+  openModal(`Настройки: ${presetName}`);
+
+  const box = document.createElement("div");
+  box.className = "psetBox";
+
+  // toggle autoRun
+  const row = document.createElement("div");
+  row.className = "psetRow";
+
+  let val = !!it.autoRun;
+
+  const chk = document.createElement("div");
+  chk.className = "psetChk" + (val ? " on" : "");
+
+  const text = document.createElement("div");
+  text.className = "psetText";
+
+  const t = document.createElement("div");
+  t.className = "psetTitle";
+  t.textContent = "Автозапуск после загрузки";
+
+  const d = document.createElement("div");
+  d.className = "psetDesc";
+  d.textContent = "После загрузки пресета автоматически выполнить Group.";
+
+  text.appendChild(t);
+  text.appendChild(d);
+
+  row.appendChild(chk);
+  row.appendChild(text);
+
+  row.onclick = () => {
+    val = !val;
+    chk.className = "psetChk" + (val ? " on" : "");
+  };
+
+  box.appendChild(row);
+
+  const save = document.createElement("button");
+  save.className = "small primary";
+  save.textContent = "Сохранить";
+  save.onclick = () => {
+    presetsUpsertGroup(state.tableName, presetName, it.payload || {}, { autoRun: val });
+    closeModal();
+    openGroupPresetsModal();
+  };
+
+  modalAppendNode(box);
+  modalAppendNode(save);
+}
+
+// ---------- Value parsing (typed only for numeric fields; otherwise keep string) ----------
 function coerceSingleValue(raw, type) {
   if (raw === null) return null;
-
   const s = String(raw ?? "").trim();
   if (s === "") return "";
-  if (s.toLowerCase() === "null") return null;   // ✅ "null" -> null
+  if (s.toLowerCase() === "null") return null;
 
   if (isIntType(type)) {
     if (/^-?\d+$/.test(s)) return Number(s);
@@ -1188,36 +1588,31 @@ function coerceSingleValue(raw, type) {
     if (/^-?\d+(\.\d+)?$/.test(norm)) return Number(norm);
     return s;
   }
-  return s; // string
+  return s;
 }
 
 function parseInValue(raw, type) {
   const s = String(raw ?? "").trim();
   if (!s) return [];
-
-  // JSON array support
   if (s.startsWith("[") && s.endsWith("]")) {
     try {
       const arr = JSON.parse(s);
       if (Array.isArray(arr)) return arr.map(v => coerceSingleValue(v, type));
     } catch {}
   }
-
-  // comma-separated
-  return s
-  .split(",")
-  .map(x => x.trim())
-  .filter(x => x.length)
-  .map(v => coerceSingleValue(v, type)); // ✅ тут coerceSingleValue уже умеет "null"
+  return s.split(",").map(x => x.trim()).filter(Boolean).map(v => coerceSingleValue(v, type));
 }
 
 // Serialize groups to server format:
-// - empty => {}
-// - one group => object
-// - multiple => [object, object]
+// {} | object | [object, object]
 function serializeGroups(mode) {
   const schema = getSchema();
-  const meta = getFieldMeta(schema, mode);
+  const baseMode =
+  (mode === "group_filters" || mode === "group_having")
+    ? (state.groupIsHistory ? "history" : "query")
+    : mode;
+
+const meta = getFieldMeta(schema, baseMode);
   const groups = getGroups(mode);
 
   const outGroups = [];
@@ -1235,77 +1630,616 @@ function serializeGroups(mode) {
       if (String(rawVal).trim() === "") continue;
 
       if (op === "in") {
-        let arr;
-        if (Array.isArray(rawVal)) {
-          arr = rawVal.map(vv => coerceSingleValue(vv, type));
-        } else {
-          arr = parseInValue(rawVal, type);
-        }
+        const arr = Array.isArray(rawVal) ? rawVal.map(vv => coerceSingleValue(vv, type)) : parseInValue(rawVal, type);
         obj[field] = { op: "in", value: arr };
         continue;
       }
 
       const v = coerceSingleValue(rawVal, type);
-      if (op === "=") {
-        obj[field] = v; // old style
-      } else {
-        obj[field] = { op, value: v };
-      }
+      if (op === "=") obj[field] = v;
+      else obj[field] = { op, value: v };
     }
-
-    // skip empty group
     if (Object.keys(obj).length) outGroups.push(obj);
   }
 
-  if (!outGroups.length) return {};          // no filters
+  if (!outGroups.length) return {};
   if (outGroups.length === 1) return outGroups[0];
   return outGroups;
 }
 
-// ---------- Get (keep old simple grid) ----------
-function getFieldMeta(schema, mode) {
-  const m = new Map();
-  const all = filterFieldsForMode(schema, mode);
-  for (const f of all) {
-    const name = f?.name;
-    if (!name) continue;
-    const t = (f.type || f.db_type || f.sql_type || f.data_type || f.dtype || "")
-      .toString().toUpperCase().trim();
-    m.set(name, t);
+// ---------- Fields + SortBy UI (Advanced) ----------
+function getAllFieldNamesForColumns() {
+  const schema = getSchema();
+  const fields = filterFieldsForMode(schema, "query");
+  const names = fields.map(f => f.name);
+
+  // добавляем created/updated/archived ТОЛЬКО если реально есть
+  for (const k of ALWAYS) {
+    if (schemaHasField(schema, k) && !names.includes(k)) names.push(k);
   }
-  return m;
+
+  // entity_fields
+  for (const ef of entityFields(schema)) {
+    if (!names.includes(ef.name)) names.push(ef.name);
+  }
+
+  // entity_id — только если есть
+  if (schemaHasField(schema, "entity_id") && !names.includes("entity_id")) names.push("entity_id");
+
+  // change/used counts
+  const cc = changeCountName(schema);
+  const uc = usedCountName(schema);
+  if (cc && !names.includes(cc)) names.push(cc);
+  if (uc && !names.includes(uc)) names.push(uc);
+
+  return [...new Set(names)];
 }
 
-function readFiltersFromGrid(schema, boxPrefix, mode) {
-  const filters = {};
-  const fields = filterFieldsForMode(schema, mode);
-  const meta = getFieldMeta(schema, mode);
+function getFieldsArr(mode) { return (mode === "history") ? (state.historyFields || []) : (state.queryFields || []); }
+function setFieldsArr(mode, arr) { if (mode === "history") state.historyFields = arr; else state.queryFields = arr; }
 
-  for (const f of fields) {
-    const name = f.name;
-    const el = document.querySelector(`#${boxPrefix}_${name}`);
-    if (!el) continue;
-    const v = el.value.trim();
-    if (!v) continue;
-
-    const t = (meta.get(name) || "").toUpperCase();
-
-    if (isIntType(t)) {
-      if (/^-?\d+$/.test(v)) filters[name] = Number(v);
-      else filters[name] = v;
-      continue;
-    }
-    if (isFloatType(t)) {
-      const norm = v.replace(",", ".");
-      if (/^-?\d+(\.\d+)?$/.test(norm)) filters[name] = Number(norm);
-      else filters[name] = v;
-      continue;
-    }
-    filters[name] = v;
-  }
-  return filters;
+function defaultSortFieldForMode(schema, mode) {
+  const wm = writeMode(schema);
+  if (wm === "append") return "created_at";
+  if (mode === "history") return "archived_at";
+  return "updated_at";
 }
 
+function ensureSortByInitialized(mode) {
+  const schema = getSchema();
+  const defField = defaultSortFieldForMode(schema, mode);
+  const target = (mode === "history") ? state.historySortBy : state.querySortBy;
+
+  if (!Array.isArray(target) || !target.length) {
+    const row = { field: defField, dir: "desc" };
+    if (mode === "history") state.historySortBy = [row];
+    else state.querySortBy = [row];
+  } else {
+    if (!target[0]?.field) target[0].field = defField;
+    if (!target[0]?.dir) target[0].dir = "desc";
+  }
+}
+
+function getSortBy(mode) { return (mode === "history") ? (state.historySortBy || []) : (state.querySortBy || []); }
+function setSortBy(mode, arr) { if (mode === "history") state.historySortBy = arr; else state.querySortBy = arr; }
+
+function normalizeSortByForSend(mode) {
+  const schema = getSchema();
+  const defField = defaultSortFieldForMode(schema, mode);
+
+  const arr = (getSortBy(mode) || []).map(x => ({
+    field: String(x?.field || "").trim(),
+    dir: (String(x?.dir || "desc").trim().toLowerCase() === "asc") ? "asc" : "desc",
+  }));
+
+  if (!arr.length) arr.push({ field: defField, dir: "desc" });
+
+  const filtered = arr.filter(x => x.field);
+  if (!filtered.length) return [{ field: defField, dir: "desc" }];
+  return filtered;
+}
+
+function buildFieldsPicker(mode, containerId) {
+  const box = document.getElementById(containerId);
+  box.textContent = "";
+
+  const all = getAllFieldNamesForColumns();
+  const selected = new Set(getFieldsArr(mode).map(x => String(x)));
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexDirection = "column";
+  wrap.style.gap = "10px";
+
+  const sel = document.createElement("select");
+  const opt0 = document.createElement("option");
+  opt0.value = "";
+  opt0.textContent = "Поле…";
+  sel.appendChild(opt0);
+
+  all.filter(n => !selected.has(n)).forEach(n => {
+    const o = document.createElement("option");
+    o.value = n;
+    o.textContent = n;
+    sel.appendChild(o);
+  });
+
+  sel.onchange = () => {
+    const v = String(sel.value || "").trim();
+    if (!v) return;
+    const cur = getFieldsArr(mode);
+    if (!cur.includes(v)) {
+      setFieldsArr(mode, [...cur, v]);
+      buildFieldsPicker(mode, containerId);
+    }
+  };
+
+  wrap.appendChild(sel);
+
+  const chips = document.createElement("div");
+  chips.className = "fqChips";
+
+  const cur = getFieldsArr(mode);
+  if (!cur.length) {
+    const m = document.createElement("div");
+    m.className = "muted";
+    m.textContent = "Пусто (вернутся дефолтные поля)";
+    chips.appendChild(m);
+  } else {
+    cur.forEach((name) => {
+      const chip = document.createElement("div");
+      chip.className = "fqChip";
+
+      const t = document.createElement("div");
+      t.className = "fqChipTxt";
+      t.textContent = name;
+
+      const x = document.createElement("button");
+      x.className = "small fqX";
+      x.textContent = "×";
+      x.onclick = () => {
+        setFieldsArr(mode, getFieldsArr(mode).filter(n => n !== name));
+        buildFieldsPicker(mode, containerId);
+      };
+
+      chip.appendChild(t);
+      chip.appendChild(x);
+      chips.appendChild(chip);
+    });
+  }
+
+  wrap.appendChild(chips);
+  box.appendChild(wrap);
+}
+
+function buildSortByUI(mode, containerId) {
+  ensureSortByInitialized(mode);
+
+  const box = document.getElementById(containerId);
+  box.textContent = "";
+
+  const schema = getSchema();
+  const allFields = getAllFieldNamesForColumns();
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexDirection = "column";
+  wrap.style.gap = "8px";
+
+  const rows = getSortBy(mode);
+
+  rows.forEach((r, idx) => {
+    const row = document.createElement("div");
+    row.className = "fqRow";
+
+    const fieldSel = document.createElement("select");
+    fieldSel.className = "fqField";
+
+    if (idx > 0) {
+      const opt0 = document.createElement("option");
+      opt0.value = "";
+      opt0.textContent = "Поле…";
+      fieldSel.appendChild(opt0);
+    }
+
+    const usedExcludingThis = new Set(
+      rows.filter((_, i) => i !== idx).map(x => String(x?.field || "").trim()).filter(Boolean)
+    );
+
+    allFields.filter(n => !usedExcludingThis.has(n)).forEach(n => {
+      const o = document.createElement("option");
+      o.value = n;
+      o.textContent = n;
+      fieldSel.appendChild(o);
+    });
+
+    const curField = String(r?.field || "").trim();
+    if (idx === 0 && !curField) {
+      fieldSel.value = defaultSortFieldForMode(schema, mode);
+    } else {
+      fieldSel.value = curField || (idx === 0 ? defaultSortFieldForMode(schema, mode) : "");
+    }
+
+    const dirSel = document.createElement("select");
+    dirSel.className = "fqField";
+    [["desc","desc"],["asc","asc"]].forEach(([v,t]) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = t;
+      dirSel.appendChild(o);
+    });
+    dirSel.value = (String(r?.dir || "desc").toLowerCase() === "asc") ? "asc" : "desc";
+
+    const btn = document.createElement("button");
+    btn.className = "small fqBtn";
+    const isLast = idx === rows.length - 1;
+
+    if (isLast) {
+      btn.textContent = "+";
+      btn.onclick = () => {
+        const next = [...getSortBy(mode), { field: "", dir: "desc" }];
+        setSortBy(mode, next);
+        buildSortByUI(mode, containerId);
+      };
+    } else {
+      btn.textContent = "×";
+      btn.onclick = () => {
+        const cur = getSortBy(mode);
+        if (cur.length <= 1) return;
+        cur.splice(idx, 1);
+        setSortBy(mode, cur);
+        buildSortByUI(mode, containerId);
+      };
+    }
+
+    fieldSel.onchange = () => {
+      const cur = getSortBy(mode);
+      cur[idx].field = fieldSel.value;
+      setSortBy(mode, cur);
+      buildSortByUI(mode, containerId);
+    };
+    dirSel.onchange = () => {
+      const cur = getSortBy(mode);
+      cur[idx].dir = dirSel.value;
+      setSortBy(mode, cur);
+    };
+
+    row.appendChild(fieldSel);
+    row.appendChild(dirSel);
+    row.appendChild(btn);
+    wrap.appendChild(row);
+  });
+
+  box.appendChild(wrap);
+}
+
+function defaultGroupBy(schema) {
+  // “entity_data” у тебя в schema явно не было; делаем pragmatic fallback:
+  const ef = entityFields(schema);
+  if (ef.length) return [ef[0].name];
+  const df = (schema.data_fields || []);
+  if (df.length) return [df[0].name];
+  const sf = (schema.search_fields || []);
+  if (sf.length) return [sf[0].name];
+  return ["entity_id"];
+}
+
+function ensureGroupDefaults() {
+  const schema = getSchema();
+  const wm = writeMode(schema);
+
+  // is_history default
+  if (wm === "append") state.groupIsHistory = true;
+
+  // group_by required
+  if (!Array.isArray(state.groupBy) || !state.groupBy.length) state.groupBy = defaultGroupBy(schema);
+
+  // aggs required
+  if (!state.groupAggs || typeof state.groupAggs !== "object" || !Object.keys(state.groupAggs).length) {
+    state.groupAggs = { count: { op: "count", field: null } };
+  }
+
+  // sort_by default = first agg key
+  if (!Array.isArray(state.groupSortBy) || !state.groupSortBy.length) {
+    const firstAggKey = Object.keys(state.groupAggs)[0] || "count";
+    state.groupSortBy = [{ field: firstAggKey, dir: "desc" }];
+  } else if (!state.groupSortBy[0]?.field) {
+    const firstAggKey = Object.keys(state.groupAggs)[0] || "count";
+    state.groupSortBy[0].field = firstAggKey;
+    state.groupSortBy[0].dir = state.groupSortBy[0].dir || "desc";
+  }
+}
+
+function buildGroupIsHistoryToggle() {
+  const box = $("#groupIsHistoryBox");
+  if (!box) return;
+  box.textContent = "";
+
+  const schema = getSchema();
+  const wm = writeMode(schema);
+  const locked = (wm === "append"); // append = только history
+
+  const row = document.createElement("div");
+  row.className = "psetRow"; // стиль как в настройках пресета
+
+  const chk = document.createElement("div");
+  chk.className = "psetChk" + ((locked || state.groupIsHistory) ? " on" : "");
+
+  const text = document.createElement("div");
+  text.className = "psetText";
+
+  const t = document.createElement("div");
+  t.className = "psetTitle";
+  t.textContent = "History";
+
+  const d = document.createElement("div");
+  d.className = "psetDesc";
+  d.textContent = locked
+    ? "Таблица в режиме append — доступна только history."
+    : "Группировать по history (иначе по current).";
+
+  text.appendChild(t);
+  text.appendChild(d);
+
+  row.appendChild(chk);
+  row.appendChild(text);
+
+  if (locked) {
+    state.groupIsHistory = true;
+    chk.className = "psetChk on";
+    row.style.opacity = "0.75";
+    row.style.cursor = "not-allowed";
+    row.onclick = () => {};
+  } else {
+    row.onclick = () => {
+      state.groupIsHistory = !state.groupIsHistory;
+      chk.className = "psetChk" + (state.groupIsHistory ? " on" : "");
+      buildFilterUI("group_filters", "filtersBoxGroup", null, { showPresets: false });
+      buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+      buildSortByUIGroup();
+    };
+  }
+
+  // ✅ ВОТ ЭТОГО НЕ ХВАТАЛО
+  box.appendChild(row);
+}
+
+function buildGroupByUI() {
+  ensureGroupDefaults();
+  const box = $("#groupByBox");
+  if (!box) return;
+  box.textContent = "";
+
+  const all = getAllFieldNamesForColumns();
+  const selected = new Set(state.groupBy);
+
+  // row: кнопка "+" слева + chips справа
+  const row = document.createElement("div");
+  row.style.display = "flex";
+  row.style.alignItems = "center";
+  row.style.gap = "10px";
+  row.style.flexWrap = "wrap";
+
+  // ✅ РЕАЛЬНАЯ квадратная кнопка "+"
+  // + прозрачный select поверх (чтобы клик открывал варианты, а "+" был идеально по центру)
+  const addWrap = document.createElement("div");
+  addWrap.className = "gbAddWrap";
+
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "small gbAddBtn";
+  addBtn.textContent = "+";
+  addBtn.title = "Добавить поле в GROUP BY";
+
+  const sel = document.createElement("select");
+  sel.className = "gbAddSelect";
+  sel.title = "Добавить поле в GROUP BY";
+
+  const o0 = document.createElement("option");
+  o0.value = "";
+  o0.textContent = "Поле…";
+  sel.appendChild(o0);
+
+  all.filter(n => !selected.has(n)).forEach(n => {
+    const o = document.createElement("option");
+    o.value = n;
+    o.textContent = n;
+    sel.appendChild(o);
+  });
+
+  sel.onchange = () => {
+    const v = String(sel.value || "").trim();
+    if (!v) return;
+    if (!state.groupBy.includes(v)) state.groupBy.push(v);
+    buildGroupByUI();
+    buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+  };
+
+  // попытаться открыть нативный picker по клику на "+"
+  addBtn.onclick = () => {
+    try {
+      if (sel.showPicker) sel.showPicker();
+      else { sel.focus(); sel.click(); }
+    } catch {
+      sel.focus(); sel.click();
+    }
+  };
+
+  addWrap.appendChild(addBtn);
+  addWrap.appendChild(sel);
+
+  // chips
+  const chips = document.createElement("div");
+  chips.className = "fqChips";
+
+  state.groupBy.forEach((name) => {
+    const chip = document.createElement("div");
+    chip.className = "fqChip";
+
+    const t = document.createElement("div");
+    t.className = "fqChipTxt";
+    t.textContent = name;
+
+    const x = document.createElement("button");
+    x.className = "small fqX";
+    x.type = "button";
+    x.textContent = "×";
+    x.onclick = () => {
+      if (state.groupBy.length <= 1) return;
+      state.groupBy = state.groupBy.filter(n => n !== name);
+      buildGroupByUI();
+      buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+    };
+
+    chip.appendChild(t);
+    chip.appendChild(x);
+    chips.appendChild(chip);
+  });
+
+  row.appendChild(chips);
+  row.appendChild(addWrap);
+  box.appendChild(row);
+}
+
+function buildAggsUI() {
+  ensureGroupDefaults();
+  const box = $("#aggsBox");
+  if (!box) return;
+  box.textContent = "";
+
+  const ops = ["count", "uniq", "sum", "avg", "min", "max"];
+  const allFields = getAllFieldNamesForColumns();
+
+  const rows = Object.entries(state.groupAggs).map(([key, v]) => ({
+    key,
+    op: v?.op || "count",
+    field: v?.field ?? null,
+  }));
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexDirection = "column";
+  wrap.style.gap = "8px";
+
+  rows.forEach((r, idx) => {
+    const row = document.createElement("div");
+    row.className = "fqRow";
+    // ✅ 4 колонки, чтобы кнопка была справа, а не “под” полями
+    row.style.gridTemplateColumns = "1.1fr .8fr 1.2fr auto";
+
+    const keyInp = document.createElement("input");
+    keyInp.placeholder = "имя агга";
+    keyInp.value = r.key;
+
+    const opSel = document.createElement("select");
+    ops.forEach(x => {
+      const o = document.createElement("option");
+      o.value = x;
+      o.textContent = x;
+      opSel.appendChild(o);
+    });
+    opSel.value = r.op;
+
+    const fieldSel = document.createElement("select");
+    const o0 = document.createElement("option");
+    o0.value = "";
+    o0.textContent = (r.op === "count") ? "field (опц.)" : "field…";
+    fieldSel.appendChild(o0);
+    allFields.forEach(n => {
+      const o = document.createElement("option");
+      o.value = n;
+      o.textContent = n;
+      fieldSel.appendChild(o);
+    });
+    fieldSel.value = (r.field == null) ? "" : String(r.field);
+
+    // ✅ показать field если:
+    // - op не count
+    // - или уже есть field
+    // - или пользователь “трогал” op (даже если снова выбрал count)
+    const touched = !!state.groupAggTouched?.[r.key];
+    const showField = (r.op !== "count") || (r.field != null) || touched;
+    fieldSel.style.display = showField ? "" : "none";
+
+    // non-count: field обязателен
+    if (r.op !== "count") fieldSel.required = true;
+
+    const btn = document.createElement("button");
+    btn.className = "small fqBtn";
+    btn.style.width = "32px";
+    btn.style.minWidth = "32px";
+    btn.style.height = "32px";
+    btn.style.padding = "0";
+    btn.style.display = "flex";
+    btn.style.alignItems = "center";
+    btn.style.justifyContent = "center";
+    const isLast = idx === rows.length - 1;
+
+    if (isLast) {
+      btn.textContent = "+";
+      btn.onclick = () => {
+        let base = "agg";
+        let i = 1;
+        while ((base + i) in state.groupAggs) i++;
+        state.groupAggs[base + i] = { op: "count", field: null };
+        buildAggsUI();
+        buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+        buildSortByUIGroup();
+      };
+    } else {
+      btn.textContent = "×";
+      btn.onclick = () => {
+        if (Object.keys(state.groupAggs).length <= 1) return;
+        delete state.groupAggs[r.key];
+        delete state.groupAggTouched?.[r.key];
+        buildAggsUI();
+        buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+        buildSortByUIGroup();
+      };
+    }
+
+    keyInp.onchange = () => {
+      const newKey = keyInp.value.trim();
+      if (!newKey || newKey === r.key) return;
+      if (state.groupAggs[newKey]) { keyInp.value = r.key; return; }
+      state.groupAggs[newKey] = state.groupAggs[r.key];
+      delete state.groupAggs[r.key];
+
+      // перенос touched
+      state.groupAggTouched ||= {};
+      if (state.groupAggTouched[r.key]) {
+        state.groupAggTouched[newKey] = true;
+        delete state.groupAggTouched[r.key];
+      }
+
+      buildAggsUI();
+      buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+      buildSortByUIGroup();
+    };
+
+    // ✅ важно: “открывать field” после выбора op, даже если выбрал тот же
+    // ✅ помечаем "touched" ПОСЛЕ выбора/закрытия, не до
+      let opened = false;
+
+      opSel.onmousedown = () => { opened = true; };
+
+      // если пользователь выбрал другое — change сработает
+      opSel.onchange = () => {
+        state.groupAggs[r.key].op = opSel.value;
+        state.groupAggTouched ||= {};
+        state.groupAggTouched[r.key] = true;
+        buildAggsUI();
+      };
+
+      // если пользователь открыл селект и выбрал то же самое (change может не сработать),
+      // то на blur всё равно считаем, что он "потрогал op"
+      opSel.onblur = () => {
+        if (!opened) return;
+        opened = false;
+        state.groupAggTouched ||= {};
+        if (!state.groupAggTouched[r.key]) {
+          state.groupAggTouched[r.key] = true;
+          buildAggsUI();
+        }
+      };
+
+    fieldSel.onchange = () => {
+      const v = String(fieldSel.value || "").trim();
+      state.groupAggs[r.key].field = v ? v : null;
+    };
+
+    row.appendChild(keyInp);
+    row.appendChild(opSel);
+    row.appendChild(fieldSel);
+    row.appendChild(btn);
+
+    wrap.appendChild(row);
+  });
+
+  box.appendChild(wrap);
+}
+
+// ---------- Get UI ----------
 function buildEntityInputs(schema, containerId, inputPrefix) {
   const box = document.getElementById(containerId);
   box.textContent = "";
@@ -1319,7 +2253,6 @@ function buildEntityInputs(schema, containerId, inputPrefix) {
     return;
   }
 
-  // stretch last if odd count (needs CSS: .kv.odd > input:last-child { grid-column: 1 / -1; })
   box.classList.toggle("odd", (ef.length % 2) === 1);
 
   for (const f of ef) {
@@ -1329,7 +2262,124 @@ function buildEntityInputs(schema, containerId, inputPrefix) {
     box.appendChild(inp);
   }
 }
+function groupSortByAllowedFields() {
+  const set = new Set();
+  (state.groupBy || []).forEach(x => set.add(String(x)));
+  Object.keys(state.groupAggs || {}).forEach(k => set.add(String(k)));
+  return [...set];
+}
 
+function ensureGroupSortBy() {
+  ensureGroupDefaults();
+  const allowed = groupSortByAllowedFields();
+  if (!state.groupSortBy?.length) {
+    state.groupSortBy = [{ field: (allowed[0] || "count"), dir: "desc" }];
+  }
+  if (!state.groupSortBy[0]?.field) state.groupSortBy[0].field = (allowed[0] || "count");
+  if (!state.groupSortBy[0]?.dir) state.groupSortBy[0].dir = "desc";
+}
+
+function buildSortByUIGroup() {
+  ensureGroupSortBy();
+  const box = $("#sortByBoxGroup");
+  box.textContent = "";
+
+  const allowed = groupSortByAllowedFields();
+  const rows = state.groupSortBy;
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexDirection = "column";
+  wrap.style.gap = "8px";
+
+  rows.forEach((r, idx) => {
+    const row = document.createElement("div");
+    row.style.display = "grid";
+    row.style.gridTemplateColumns = "1fr 1fr auto";
+    row.style.gap = "8px";
+    row.style.alignItems = "center";
+
+    const fieldSel = document.createElement("select");
+    if (idx > 0) {
+      const o0 = document.createElement("option");
+      o0.value = "";
+      o0.textContent = "Поле…";
+      fieldSel.appendChild(o0);
+    }
+
+    const usedExcl = new Set(rows.filter((_, i) => i !== idx).map(x => String(x?.field || "").trim()).filter(Boolean));
+    allowed.filter(n => !usedExcl.has(n)).forEach(n => {
+      const o = document.createElement("option");
+      o.value = n;
+      o.textContent = n;
+      fieldSel.appendChild(o);
+    });
+
+    fieldSel.value = String(r?.field || (allowed[0] || "count"));
+
+    const dirSel = document.createElement("select");
+    [["desc","desc"],["asc","asc"]].forEach(([v,t]) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = t;
+      dirSel.appendChild(o);
+    });
+    dirSel.value = (String(r?.dir || "desc").toLowerCase() === "asc") ? "asc" : "desc";
+
+    const btn = document.createElement("button");
+    btn.className = "small fqBtn";
+
+    const isLast = idx === rows.length - 1;
+
+    if (isLast) {
+      btn.textContent = "+";
+      btn.onclick = () => {
+        state.groupSortBy = [...state.groupSortBy, { field: "", dir: "desc" }];
+        buildSortByUIGroup();
+      };
+    } else {
+      btn.textContent = "×";
+      btn.onclick = () => {
+        if (state.groupSortBy.length <= 1) return; // нельзя удалить единственную
+        state.groupSortBy.splice(idx, 1);
+        buildSortByUIGroup();
+      };
+    }
+
+    fieldSel.onchange = () => {
+      state.groupSortBy[idx].field = fieldSel.value;
+      buildSortByUIGroup();
+    };
+    dirSel.onchange = () => {
+      state.groupSortBy[idx].dir = dirSel.value;
+    };
+
+    row.appendChild(fieldSel);
+    row.appendChild(dirSel);
+    row.appendChild(btn);
+    wrap.appendChild(row);
+  });
+
+  box.appendChild(wrap);
+}
+
+function normalizeGroupSortByForSend() {
+  ensureGroupSortBy();
+  const allowed = new Set(groupSortByAllowedFields());
+
+  const arr = (state.groupSortBy || [])
+    .map(x => ({
+      field: String(x?.field || "").trim(),
+      dir: (String(x?.dir || "desc").toLowerCase() === "asc") ? "asc" : "desc"
+    }))
+    .filter(x => x.field && allowed.has(x.field));
+
+  if (!arr.length) {
+    const fallback = groupSortByAllowedFields()[0] || "count";
+    return [{ field: fallback, dir: "desc" }];
+  }
+  return arr;
+}
 function readEntityForGet(schema, inputPrefix) {
   const ef = entityFields(schema);
   const entity = {};
@@ -1340,33 +2390,6 @@ function readEntityForGet(schema, inputPrefix) {
     entity[f.name] = v;
   }
   return entity;
-}
-
-function buildFiltersGrid(schema, containerId, idPrefix, mode) {
-  const box = document.getElementById(containerId);
-  box.textContent = "";
-
-  const fields = filterFieldsForMode(schema, mode);
-  if (!fields.length) {
-    const m = document.createElement("div");
-    m.className = "muted";
-    m.textContent = "Нет полей";
-    box.appendChild(m);
-    return;
-  }
-
-  const wrap = document.createElement("div");
-  wrap.style.display = "grid";
-  wrap.style.gridTemplateColumns = window.matchMedia("(max-width: 720px)").matches ? "1fr" : "1fr 1fr";
-  wrap.style.gap = "10px";
-
-  for (const f of fields) {
-    const inp = document.createElement("input");
-    inp.id = `${idPrefix}_${f.name}`;
-    inp.placeholder = f.name;
-    wrap.appendChild(inp);
-  }
-  box.appendChild(wrap);
 }
 
 // ---------- identifier filters for history modal ----------
@@ -1384,33 +2407,42 @@ function buildEntityFiltersFromRow(schema, row) {
   return { ok: true, filters };
 }
 
-// ---------- advanced readers ----------
+// ---------- Advanced readers ----------
 function readQueryAdvanced() {
   const limit = Number($("#limitInput").value || 50);
   const offset = Number($("#offsetInput").value || 0);
-  const sort = ($("#sortSelect").value || "desc").trim() || "desc";
   const at_date = ($("#atDateInput").value || "").trim() || undefined;
-  return { limit, offset, sort, at_date };
+  return { limit, offset, at_date };
 }
 function readHistoryAdvanced() {
   const limit = Number($("#historyLimitInput").value || 100);
   const offset = Number($("#historyOffsetInput").value || 0);
-  const sort = ($("#historySortSelect").value || "desc").trim() || "desc";
   const from_date = ($("#fromDateInput").value || "").trim() || undefined;
   const to_date = ($("#toDateInput").value || "").trim() || undefined;
-  return { limit, offset, sort, from_date, to_date };
+  return { limit, offset, from_date, to_date };
 }
 
 // ---------- actions ----------
 async function runQuery() {
-  const { limit, offset, sort, at_date } = readQueryAdvanced();
+  const { limit, offset, at_date } = readQueryAdvanced();
 
   state.lastMode = (state.listEndpoint === "/read/history") ? "history" : "query";
   state.lastOffset = offset;
   state.lastLimit = limit;
 
   const filters = serializeGroups("query");
-  const payload = { table: state.tableName, filters, limit, offset, sort };
+
+  const payload = {
+    table: state.tableName,
+    filters,
+    limit,
+    offset,
+    sort_by: normalizeSortByForSend("query"),
+  };
+
+  const fields = state.queryFields;
+  if (Array.isArray(fields) && fields.length) payload.fields = fields;
+
   if (at_date) payload.at_date = at_date;
 
   const data = await apiFetch(state.listEndpoint, { method: "POST", body: payload });
@@ -1420,8 +2452,6 @@ async function runQuery() {
 async function doGet() {
   const schema = getSchema();
   const entity = readEntityForGet(schema, "gent");
-
-  // keep Get filters as old "grid equals" (with typing)
   const payload = { table: state.tableName, entity };
 
   state.lastMode = "get";
@@ -1433,13 +2463,6 @@ async function doGet() {
     const arr = normalizeToArray(deepDecode(data));
     if (!arr.length) renderResults({ results: [], count: 0, total: 0 }, "get");
     else renderResults(data, "get");
-
-    // ✅ auto-collapse Get after success (особенно удобно на мобиле)
-    // try {
-    //   $("#getSection")?.classList.add("hidden");
-    //   const b = $("#toggleGetBtn");
-    //   if (b) b.textContent = "▸";
-    // } catch {}
   } catch (e) {
     renderResults({ results: [], count: 0, total: 0 }, "get");
     throw e;
@@ -1447,19 +2470,70 @@ async function doGet() {
 }
 
 async function doHistory() {
-  const { limit, offset, sort, from_date, to_date } = readHistoryAdvanced();
+  const { limit, offset, from_date, to_date } = readHistoryAdvanced();
 
   state.lastMode = "history";
   state.lastOffset = offset;
   state.lastLimit = limit;
 
   const filters = serializeGroups("history");
-  const payload = { table: state.tableName, filters, limit, offset, sort };
+
+  const payload = {
+    table: state.tableName,
+    filters,
+    limit,
+    offset,
+    sort_by: normalizeSortByForSend("history"),
+  };
+
+  const fields = state.historyFields;
+  if (Array.isArray(fields) && fields.length) payload.fields = fields;
+
   if (from_date) payload.from_date = from_date;
   if (to_date) payload.to_date = to_date;
 
   const data = await apiFetch("/read/history", { method: "POST", body: payload });
   renderResults(data, "history");
+}
+
+async function doGroup() {
+  ensureGroupDefaults();
+
+  const schema = getSchema();
+  const wm = writeMode(schema);
+  const is_history = (wm === "append") ? true : !!state.groupIsHistory;
+
+  const limit = Number($("#groupLimitInput").value || 100);
+  const offset = Number($("#groupOffsetInput").value || 0);
+
+  // validate aggs: non-count требует field
+  for (const [k, v] of Object.entries(state.groupAggs)) {
+    const op = String(v?.op || "").trim();
+    if (!op) throw new Error(`Agg ${k}: нужен op`);
+    if (op !== "count") {
+      const f = v?.field;
+      if (!f) throw new Error(`Agg ${k}: для op=${op} нужен field`);
+    }
+  }
+
+  const payload = {
+    table: state.tableName,
+    is_history,
+    group_by: state.groupBy,
+    aggs: state.groupAggs,
+    having: serializeGroups("group_having"),
+    sort_by: normalizeGroupSortByForSend(),
+    filters: serializeGroups("group_filters"),
+    limit,
+    offset,
+  };
+
+  state.lastMode = "group";
+  state.lastOffset = offset;
+  state.lastLimit = limit;
+
+  const data = await apiFetch("/read/group", { method: "POST", body: payload });
+  renderResults(data, "group");
 }
 
 // ---------- render ----------
@@ -1513,8 +2587,12 @@ function getAllowedColumnsFromSchema() {
 
   return new Set(names);
 }
-function pickColumns(arr) {
+function pickColumns(arr, mode = null) {
   const cols = arr.length ? Object.keys(arr[0]) : [];
+
+  // ✅ group: всегда показываем всё, включая aggs
+  if (mode === "group") return cols;
+
   const allow = getAllowedColumnsFromSchema();
   if (!allow) return cols;
   return cols.filter(c => allow.has(c));
@@ -1553,7 +2631,7 @@ function renderResults(payload, mode) {
   tbody.textContent = "";
   theadRow.textContent = "";
 
-  const cols = pickColumns(arr);
+  const cols = pickColumns(arr, mode);
   if (!cols.length) {
     const th = document.createElement("th");
     th.textContent = "—";
@@ -1574,8 +2652,11 @@ function renderResults(payload, mode) {
     theadRow.appendChild(th);
   });
 
-  // click for history modal: any entity_fields cell
+    // click for history modal: any entity_fields cell
   const entityFieldSet = new Set(entityFields(schema).map(f => f.name));
+
+  // ✅ group-by подсветка
+  const groupBySet = new Set((state.groupBy || []));
 
   arr.forEach((row) => {
     const tr = document.createElement("tr");
@@ -1584,6 +2665,26 @@ function renderResults(payload, mode) {
       const td = document.createElement("td");
       const text = toDisplayString(row?.[c], c);
 
+      // ✅ GROUP: подсветить + drilldown (всегда Query)
+      if (mode === "group" && groupBySet.has(c)) {
+        td.classList.add("colGroupBy");
+        td.classList.add("cellLink");
+
+        const short = text.length > MAX_CELL ? (text.slice(0, MAX_CELL) + "…") : text;
+        td.textContent = short;
+
+        td.onclick = async (e) => {
+          e.stopPropagation();
+          const f = {};
+          for (const k of (state.groupBy || [])) f[k] = row?.[k];
+          await openDrilldownModalFromGroupRow(f);
+        };
+
+        tr.appendChild(td);
+        return;
+      }
+
+      // ✅ History modal: entity_fields (только для query/get, как было)
       if ((mode === "query" || mode === "get") && entityFieldSet.has(c)) {
         td.classList.add("cellLink");
         td.textContent = text.length > MAX_CELL ? (text.slice(0, MAX_CELL) + "…") : text;
@@ -1597,6 +2698,7 @@ function renderResults(payload, mode) {
         return;
       }
 
+      // ✅ обычная ячейка: показать полное значение в модалке
       td.classList.add("cellClickable");
       if (text.length > MAX_CELL) {
         td.classList.add("cellTrunc");
@@ -1604,7 +2706,12 @@ function renderResults(payload, mode) {
       } else {
         td.textContent = text;
       }
-      td.onclick = (e) => { e.stopPropagation(); openModal(c); modalSetPre(text); };
+      td.onclick = (e) => {
+        e.stopPropagation();
+        openModal(c);
+        modalSetPre(text);
+      };
+
       tr.appendChild(td);
     });
 
@@ -1620,7 +2727,6 @@ async function openHistoryModalFromEntityFilters(entityFilters) {
   historyModal = {
     offset: adv.offset ?? 0,
     limit: adv.limit ?? 100,
-    sort: adv.sort ?? "desc",
     from_date: adv.from_date,
     to_date: adv.to_date,
     total: null,
@@ -1667,18 +2773,12 @@ async function openHistoryModalFromEntityFilters(entityFilters) {
 }
 
 async function historyModalAppend() {
-  // /read/history must include entity_fields identifier
   const filters = { ...(historyModal.baseEntityFilters || {}) };
 
-  // Extra: also apply History builder filters (OR/groups) ONLY if it is a single-object
-  // чтобы не ломать идентификатор. Если пользователь сделал OR — игнорируем тут (можно расширить позже).
+  // optionally merge extra history builder filters (single object only)
   const extra = serializeGroups("history");
-  if (Array.isArray(extra)) {
-    // ignore OR in modal (keeps identifier stable)
-  } else if (extra && typeof extra === "object") {
-    for (const k of Object.keys(extra)) {
-      if (!(k in filters)) filters[k] = extra[k];
-    }
+  if (!Array.isArray(extra) && extra && typeof extra === "object") {
+    for (const k of Object.keys(extra)) if (!(k in filters)) filters[k] = extra[k];
   }
 
   const payload = {
@@ -1686,8 +2786,12 @@ async function historyModalAppend() {
     filters,
     limit: historyModal.limit,
     offset: historyModal.offset,
-    sort: historyModal.sort,
+    sort_by: normalizeSortByForSend("history"),
   };
+
+  const fields = state.historyFields;
+  if (Array.isArray(fields) && fields.length) payload.fields = fields;
+
   if (historyModal.from_date) payload.from_date = historyModal.from_date;
   if (historyModal.to_date) payload.to_date = historyModal.to_date;
 
@@ -1862,7 +2966,8 @@ function buildTableList(filterText = "") {
 
 // ---------- load/change ----------
 async function loadTables() {
-  const tables = await apiFetch("/config/tables", { method: "GET" });
+  // noToast: login controls its own UX
+  const tables = await apiFetch("/config/tables", { method: "GET", noToast: true });
   state.tables = tables || {};
   const names = Object.keys(state.tables);
   if (!names.length) throw new Error("Нет таблиц");
@@ -1888,21 +2993,57 @@ function onTableChange() {
 
   localStorage.setItem(LS_LAST_TABLE, state.tableName);
 
+  // reset filter models
   state.queryDrafts = [{ id: state.draftSeq++, field: "", value: "" }];
   state.historyDrafts = [{ id: state.draftSeq++, field: "", value: "" }];
   state.queryGroups = [[]];
   state.historyGroups = [[]];
 
-  // reset filter models
-  state.queryGroups = [[]];
-  state.historyGroups = [[]];
+  // reset fields + sort_by
+  state.queryFields = [];
+  state.historyFields = [];
+  state.querySortBy = [];
+  state.historySortBy = [];
+  ensureSortByInitialized("query");
+  ensureSortByInitialized("history");
 
-  // Get entity fields + Get extra filters (grid)
+  // close inner advanced sections
+  state.fieldsOpen = false;
+  state.sortByOpen = false;
+  state.historyFieldsOpen = false;
+  state.historySortByOpen = false;
+  $("#fieldsSection")?.classList.add("hidden");
+  $("#sortBySection")?.classList.add("hidden");
+  $("#fieldsHistorySection")?.classList.add("hidden");
+  $("#sortByHistorySection")?.classList.add("hidden");
+  $("#toggleFieldsBtn") && ($("#toggleFieldsBtn").textContent = "Поля ▸");
+  $("#toggleSortByBtn") && ($("#toggleSortByBtn").textContent = "Сортировка ▸");
+  $("#toggleFieldsHistoryBtn") && ($("#toggleFieldsHistoryBtn").textContent = "Поля ▸");
+  $("#toggleSortByHistoryBtn") && ($("#toggleSortByHistoryBtn").textContent = "Сортировка ▸");
+
+  // Get entity fields
   buildEntityInputs(schema, "entityBoxGet", "gent");
 
-  // Build new builders for Query/History
+  // builders
   buildFilterUI("query", "filtersBoxQuery");
   buildFilterUI("history", "filtersBoxHistory");
+
+  // Group reset
+state.groupFilterDrafts = [{ id: state.draftSeq++, field: "", value: "" }];
+state.groupHavingDrafts = [{ id: state.draftSeq++, field: "", value: "" }];
+state.groupFiltersGroups = [[]];
+state.groupHavingGroups = [[]];
+state.groupBy = [];
+state.groupAggs = { count: { op: "count", field: null } };
+state.groupSortBy = [];
+state.groupIsHistory = false;
+
+// build Group filter builders (без внутренних presets)
+buildFilterUI("group_filters", "filtersBoxGroup", null, { showPresets: false });
+buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields(), { showPresets: false });
+
+// defaults for group-by/aggs/sort_by
+ensureGroupDefaults();
 
   applyTableCapabilities(schema);
   renderResults({ results: [], count: 0, total: 0 }, null);
@@ -1917,65 +3058,22 @@ function refreshToggleButtons() {
 }
 
 // ---------- UI wiring ----------
-function bindToggle(headSel, bodySel, btnSel) {
+function bindToggle(headSel, bodySel, btnSel, onOpen = null) {
   const head = $(headSel), body = $(bodySel), btn = $(btnSel);
   const toggle = () => {
     const open = body.classList.contains("hidden");
     body.classList.toggle("hidden", !open);
     btn.textContent = open ? "▾" : "▸";
+    if (open && typeof onOpen === "function") onOpen();
   };
   head.onclick = () => toggle();
   btn.onclick = (e) => { e.stopPropagation(); toggle(); };
 }
 
-function presetsLoadAll() {
-  try { return JSON.parse(localStorage.getItem(LS_PRESETS) || "{}"); }
-  catch { return {}; }
-}
-function presetsSaveAll(obj) {
-  localStorage.setItem(LS_PRESETS, JSON.stringify(obj || {}));
-}
-
-function presetsKey(table, mode) {
-  return `${table}::${mode}`; // mode: "query" or "history"
-}
-
-function presetsList(table, mode) {
-  const all = presetsLoadAll();
-  const k = presetsKey(table, mode);
-  return Array.isArray(all[k]) ? all[k] : [];
-}
-
-function presetsUpsert(table, mode, name, groups, opts = {}) {
-  const all = presetsLoadAll();
-  const k = presetsKey(table, mode);
-  const arr = Array.isArray(all[k]) ? all[k] : [];
-  const cleanName = (name || "").trim();
-  if (!cleanName) throw new Error("Нужно имя");
-
-  const item = {
-    name: cleanName,
-    groups: groups || [[]],
-    autoRun: !!opts.autoRun,
-  };
-
-  const idx = arr.findIndex(x => (x?.name || "") === cleanName);
-  if (idx >= 0) arr[idx] = item;
-  else arr.push(item);
-
-  all[k] = arr;
-  presetsSaveAll(all);
-}
-
-function presetsRemove(table, mode, name) {
-  const all = presetsLoadAll();
-  const k = presetsKey(table, mode);
-  const arr = Array.isArray(all[k]) ? all[k] : [];
-  all[k] = arr.filter(x => (x?.name || "") !== name);
-  presetsSaveAll(all);
-}
-
 function wireUI() {
+  // toast
+  $("#toastCloseBtn").onclick = hideToast;
+
   // modal
   $("#modalCloseBtn").onclick = closeModal;
   $("#modalBack").onclick = (e) => { if (e.target.id === "modalBack") closeModal(); };
@@ -2031,8 +3129,11 @@ function wireUI() {
       localStorage.removeItem(LS_KEY);
       setAuthed(false);
       setStatus(e.message);
+      // config/tables error shows here (no toast)
     }
   };
+
+  $("#groupPresetsBtn").onclick = () => openGroupPresetsModal();
 
   $("#logoutBtn").onclick = () => {
     state.apiKey = "";
@@ -2058,11 +3159,105 @@ function wireUI() {
   });
 
   // sections
-  bindToggle("#queryHead", "#querySection", "#toggleQueryBtn");
+  bindToggle("#queryHead", "#querySection", "#toggleQueryBtn", () => {
+    // авто-открыть filters
+    state.filtersOpen = true;
+    $("#filtersSection").classList.remove("hidden");
+    $("#toggleFiltersBtn").textContent = "Фильтры ▾";
+  });
   bindToggle("#getHead", "#getSection", "#toggleGetBtn");
-  bindToggle("#historyHead", "#historySection", "#toggleHistoryBtn");
+  bindToggle("#historyHead", "#historySection", "#toggleHistoryBtn", () => {
+    state.historyFiltersOpen = true;
+    $("#historyFiltersSection").classList.remove("hidden");
+    $("#toggleHistoryFiltersBtn").textContent = "Фильтры ▾";
+  });
+  bindToggle("#groupHead", "#groupSection", "#toggleGroupBtn", () => {
+    // ✅ открыть GA, закрыть Filters/Having/Advanced
+    state.groupGaOpen = true;
+    $("#groupGaSection").classList.remove("hidden");
+    $("#toggleGroupGaBtn").textContent = "GROUP BY & AGGS ▾";
 
-  // inner toggles
+    state.groupFiltersOpen = false;
+    $("#groupFiltersSection").classList.add("hidden");
+    $("#toggleGroupFiltersBtn").textContent = "Фильтры ▸";
+
+    state.groupHavingOpen = false;
+    $("#groupHavingSection").classList.add("hidden");
+    $("#toggleGroupHavingBtn").textContent = "Having ▸";
+
+    state.groupAdvancedOpen = false;
+    $("#groupAdvancedSection").classList.add("hidden");
+    $("#toggleGroupAdvancedBtn").textContent = "Дополнительно ▸";
+
+    state.groupSortByOpen = false;
+    $("#groupSortBySection").classList.add("hidden");
+    $("#toggleGroupSortByBtn").textContent = "Сортировка ▸";
+
+    ensureGroupDefaults();
+    buildGroupIsHistoryToggle();
+    buildGroupByUI();
+    buildAggsUI();
+    buildSortByUIGroup();
+
+    buildGroupIsHistoryToggle();
+  });
+
+  // Group toggles
+  $("#toggleGroupFiltersBtn").onclick = () => {
+    state.groupFiltersOpen = !state.groupFiltersOpen;
+    $("#groupFiltersSection").classList.toggle("hidden", !state.groupFiltersOpen);
+    $("#toggleGroupFiltersBtn").textContent = state.groupFiltersOpen ? "Фильтры ▾" : "Фильтры ▸";
+  };
+
+  $("#toggleGroupHavingBtn").onclick = () => {
+    state.groupHavingOpen = !state.groupHavingOpen;
+    $("#groupHavingSection").classList.toggle("hidden", !state.groupHavingOpen);
+    $("#toggleGroupHavingBtn").textContent = state.groupHavingOpen ? "Having ▾" : "Having ▸";
+    if (state.groupHavingOpen) {
+      buildFilterUI("group_having", "havingBoxGroup", groupHavingAllowedFields());
+    }
+  };
+
+  $("#toggleGroupAdvancedBtn").onclick = () => {
+    state.groupAdvancedOpen = !state.groupAdvancedOpen;
+    $("#groupAdvancedSection").classList.toggle("hidden", !state.groupAdvancedOpen);
+    $("#toggleGroupAdvancedBtn").textContent = state.groupAdvancedOpen ? "Дополнительно ▾" : "Дополнительно ▸";
+    if (state.groupAdvancedOpen) {
+      ensureGroupDefaults();
+      buildGroupIsHistoryToggle();
+      buildGroupByUI();
+      buildAggsUI();
+    }
+  };
+
+  $("#toggleGroupSortByBtn").onclick = () => {
+    state.groupSortByOpen = !state.groupSortByOpen;
+    $("#groupSortBySection").classList.toggle("hidden", !state.groupSortByOpen);
+    $("#toggleGroupSortByBtn").textContent = state.groupSortByOpen ? "Сортировка ▾" : "Сортировка ▸";
+    if (state.groupSortByOpen) buildSortByUIGroup();
+  };
+
+  $("#groupBtn").onclick = async () => {
+    $("#groupOffsetInput").value = "0";
+    state.lastOffset = 0;
+    try { await doGroup(); setStatus("OK"); } catch (e) { setStatus(e.message); }
+  };
+
+  $("#groupNextBtn").onclick = async () => {
+    const lim = Number($("#groupLimitInput").value || 100);
+    const cur = Number($("#groupOffsetInput").value || 0);
+    $("#groupOffsetInput").value = String(cur + lim);
+    try { await doGroup(); setStatus("OK"); } catch (e) { setStatus(e.message); }
+  };
+
+  $("#groupPrevBtn").onclick = async () => {
+    const lim = Number($("#groupLimitInput").value || 100);
+    const cur = Number($("#groupOffsetInput").value || 0);
+    $("#groupOffsetInput").value = String(Math.max(0, cur - lim));
+    try { await doGroup(); setStatus("OK"); } catch (e) { setStatus(e.message); }
+  };
+
+  // inner toggles (filters/advanced)
   $("#toggleFiltersBtn").onclick = () => {
     state.filtersOpen = !state.filtersOpen;
     $("#filtersSection").classList.toggle("hidden", !state.filtersOpen);
@@ -2082,6 +3277,52 @@ function wireUI() {
     state.historyAdvancedOpen = !state.historyAdvancedOpen;
     $("#historyAdvancedSection").classList.toggle("hidden", !state.historyAdvancedOpen);
     $("#toggleHistoryAdvancedBtn").textContent = state.historyAdvancedOpen ? "Дополнительно ▾" : "Дополнительно ▸";
+  };
+
+  // Advanced: fields/sort_by mutual close
+  $("#toggleFieldsBtn").onclick = () => {
+    state.fieldsOpen = !state.fieldsOpen;
+    if (state.fieldsOpen) {
+      state.sortByOpen = false;
+      $("#sortBySection").classList.add("hidden");
+      $("#toggleSortByBtn").textContent = "Сортировка ▸";
+    }
+    $("#fieldsSection").classList.toggle("hidden", !state.fieldsOpen);
+    $("#toggleFieldsBtn").textContent = state.fieldsOpen ? "Поля ▾" : "Поля ▸";
+    if (state.fieldsOpen) buildFieldsPicker("query", "fieldsBoxQuery");
+  };
+  $("#toggleSortByBtn").onclick = () => {
+    state.sortByOpen = !state.sortByOpen;
+    if (state.sortByOpen) {
+      state.fieldsOpen = false;
+      $("#fieldsSection").classList.add("hidden");
+      $("#toggleFieldsBtn").textContent = "Поля ▸";
+    }
+    $("#sortBySection").classList.toggle("hidden", !state.sortByOpen);
+    $("#toggleSortByBtn").textContent = state.sortByOpen ? "Сортировка ▾" : "Сортировка ▸";
+    if (state.sortByOpen) buildSortByUI("query", "sortByBoxQuery");
+  };
+  $("#toggleFieldsHistoryBtn").onclick = () => {
+    state.historyFieldsOpen = !state.historyFieldsOpen;
+    if (state.historyFieldsOpen) {
+      state.historySortByOpen = false;
+      $("#sortByHistorySection").classList.add("hidden");
+      $("#toggleSortByHistoryBtn").textContent = "Сортировка ▸";
+    }
+    $("#fieldsHistorySection").classList.toggle("hidden", !state.historyFieldsOpen);
+    $("#toggleFieldsHistoryBtn").textContent = state.historyFieldsOpen ? "Поля ▾" : "Поля ▸";
+    if (state.historyFieldsOpen) buildFieldsPicker("history", "fieldsBoxHistory");
+  };
+  $("#toggleSortByHistoryBtn").onclick = () => {
+    state.historySortByOpen = !state.historySortByOpen;
+    if (state.historySortByOpen) {
+      state.historyFieldsOpen = false;
+      $("#fieldsHistorySection").classList.add("hidden");
+      $("#toggleFieldsHistoryBtn").textContent = "Поля ▸";
+    }
+    $("#sortByHistorySection").classList.toggle("hidden", !state.historySortByOpen);
+    $("#toggleSortByHistoryBtn").textContent = state.historySortByOpen ? "Сортировка ▾" : "Сортировка ▸";
+    if (state.historySortByOpen) buildSortByUI("history", "sortByBoxHistory");
   };
 
   // actions
@@ -2134,6 +3375,10 @@ function wireUI() {
     const expanded = $("#grid").classList.toggle("expanded");
     $("#expandPrevBtn").classList.toggle("hidden", !expanded);
     $("#expandNextBtn").classList.toggle("hidden", !expanded);
+
+    // ✅ расширенный режим = авто-ширина колонок
+    $("#tableWrap")?.classList.toggle("tableAuto", expanded);
+
     if (expanded) {
       $("#expandPrevBtn").disabled = $("#bottomPrevBtn").disabled;
       $("#expandNextBtn").disabled = $("#bottomNextBtn").disabled;
@@ -2149,6 +3394,10 @@ function wireUI() {
   $("#toggleHistoryFiltersBtn").textContent = "Фильтры ▸";
   $("#toggleAdvancedBtn").textContent = "Дополнительно ▸";
   $("#toggleHistoryAdvancedBtn").textContent = "Дополнительно ▸";
+  $("#toggleFieldsBtn").textContent = "Поля ▸";
+  $("#toggleSortByBtn").textContent = "Сортировка ▸";
+  $("#toggleFieldsHistoryBtn").textContent = "Поля ▸";
+  $("#toggleSortByHistoryBtn").textContent = "Сортировка ▸";
 }
 
 // ---------- init ----------

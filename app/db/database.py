@@ -94,6 +94,7 @@ class DatabaseDriver(ABC):
             self,
             schema: TableSchema,
             is_history: bool,
+            fields: list[str],
             filters: FilterGroups,
             group_by: List[str],
             aggs: Aggregates,

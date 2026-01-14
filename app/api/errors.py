@@ -1,6 +1,4 @@
-import logging
 from fastapi import HTTPException, Request
-from starlette.responses import JSONResponse
 
 
 class ValidationError(HTTPException):

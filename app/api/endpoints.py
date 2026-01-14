@@ -14,9 +14,13 @@ router = APIRouter()
 
 @router.post("/write/save")
 async def save_endpoint(req: SaveRequest) -> SaveResponse:
-    changed = await WriteService.save(
-        req.table, req.entity, req.data, req.now
-    )
+    try:
+        changed = await WriteService.save(
+            req.table, req.entity, req.data, req.now
+        )
+    except Exception as e:
+        logging.error(f"SAVE {e} {req}")
+        raise e
 
     return SaveResponse(success=True, changed=changed)
 
@@ -55,7 +59,7 @@ async def history_endpoint(req: HistoryRequest) -> HistoryResponse:
 @router.post("/read/group")
 async def group_endpoint(req: GroupRequest) -> GroupResponse:
     results, total = await ReadService.get_grouped(
-        req.table, req.is_history, req.filters,
+        req.table, req.is_history, req.fields, req.filters,
         req.group_by, req.aggs, req.having,
         req.limit, req.offset, req.sort_by
     )

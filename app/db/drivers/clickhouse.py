@@ -14,7 +14,7 @@ from app.db.table_schema import TableSchema, FieldConfig
 from app.db.field_types import FieldType
 from app.models.agg_types import Aggregates, AggOp
 from app.models.filter_types import FilterGroups, FilterClause
-from app.models.query_types import SortBy, SortItem
+from app.models.query_types import SortBy
 from app.utils.conversion import convert_value
 from app.utils.hashing import compute_hash
 from app.utils.sql_ident import validate_sql_alias, validate_sql_col
@@ -553,6 +553,7 @@ class ClickHouseDriver(DatabaseDriver):
             self,
             schema: TableSchema,
             is_history: bool,
+            fields: list[str],
             filters: FilterGroups,
             group_by: List[str],
             aggs: Aggregates,

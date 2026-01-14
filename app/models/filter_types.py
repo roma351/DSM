@@ -15,4 +15,3 @@ class FilterClause(BaseModel):
 FilterExpr = Union[FilterValue, List[FilterValue], FilterClause]
 FilterGroup = Dict[str, FilterExpr]
 FilterGroups = List[FilterGroup]
-

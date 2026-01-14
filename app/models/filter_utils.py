@@ -21,7 +21,7 @@ def normalize_entity(entity: Optional[EntityKey], entity_id: Optional[str]) -> E
 
 
 def normalize_filters(filters: Union[FilterGroups, FilterGroup, None]) -> FilterGroups:
-    if filters is None:
+    if not filters:
         return []
     elif isinstance(filters, dict):
         groups = [filters]
@@ -30,8 +30,8 @@ def normalize_filters(filters: Union[FilterGroups, FilterGroup, None]) -> Filter
 
     norm: FilterGroups = []
     for g in groups:
-        if not isinstance(g, dict) or not g:
-            raise ValidationError("Each filters group must be a non-empty dict")
+        # if not isinstance(g, dict) or not g:
+        #     raise ValidationError("Each filters group must be a non-empty dict")
 
         ng: FilterGroup = {}
         for name, expr in g.items():

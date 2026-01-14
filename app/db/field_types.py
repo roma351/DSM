@@ -11,3 +11,4 @@ class FieldType(str, Enum):
     NUMERIC = "NUMERIC"
     JSONB = "JSONB"
     TEXT = "TEXT"
+    # ARRAY[STRING]

@@ -14,6 +14,7 @@ from app.models.filter_utils import (
 )
 from app.models.filter_types import EntityKey, FilterClause, FilterGroup, FilterGroups
 from app.models.query_types import Fields, SortBy, SortItem
+from app.models.query_utils import normalize_sort_by
 
 
 class SaveRequest(BaseModel):
@@ -44,7 +45,7 @@ class QueryRequest(BaseModel):
     table: str
     fields: Fields = None
     filters: Union[FilterGroups, FilterGroup, None] = None
-    sort_by: SortBy = None
+    sort_by: Union[SortBy, SortItem] = None
     limit: int = 100
     offset: int = 0
 
@@ -54,6 +55,7 @@ class QueryRequest(BaseModel):
     @model_validator(mode="after")
     def _validate(self):
         self.filters = normalize_filters(self.filters)
+        self.sort_by = normalize_sort_by(self.sort_by)
 
         if not self.sort_by:
             self.sort_by = [SortItem(field="created_at", dir=self.sort)]
@@ -76,7 +78,7 @@ class HistoryRequest(BaseModel):
     table: str
     fields: Fields = None
     filters: Union[FilterGroups, FilterGroup, None] = None
-    sort_by: SortBy = None
+    sort_by: Union[SortBy, SortItem] = None
     limit: int = 100
     offset: int = 0
 
@@ -88,6 +90,7 @@ class HistoryRequest(BaseModel):
     @model_validator(mode="after")
     def _validate(self):
         self.filters = normalize_filters(self.filters)
+        self.sort_by = normalize_sort_by(self.sort_by)
 
         if self.entity_id is not None:
             self.filters = add_filter_to_all_groups(self.filters, "entity_id", FilterClause(op="=", value=self.entity_id))
@@ -109,8 +112,9 @@ class HistoryRequest(BaseModel):
 
 class GroupRequest(BaseModel):
     table: str
+    fields: Fields = None
     filters: Union[FilterGroups, FilterGroup, None] = None
-    sort_by: SortBy = None
+    sort_by: Union[SortBy, SortItem] = None
     group_by: List[str] = Field(default_factory=list)
     aggs: Aggregates = Field(default_factory=dict)
     having: Union[FilterGroups, FilterGroup] = None
@@ -120,14 +124,13 @@ class GroupRequest(BaseModel):
     is_history: bool = False
 
     sort: Literal["desc", "asc"] = "desc"
-    from_date: Optional[str] = None
-    to_date: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate(self):
         self.filters = normalize_filters(self.filters)
         self.having = normalize_filters(self.having)
         self.aggs = normalize_aggs(self.aggs)
+        self.sort_by = normalize_sort_by(self.sort_by)
 
         if not self.group_by:
             raise ValidationError("group_by is required")

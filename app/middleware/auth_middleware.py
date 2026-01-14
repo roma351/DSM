@@ -29,7 +29,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             # except HTTPException:
             #     raise
             except Exception as exc:
-                return self.global_exception(request, exc)
+                return await self.global_exception(request, exc)
 
         return JSONResponse(
             status_code=403,
@@ -94,13 +94,19 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             content={"detail": "Forbidden"}
         )
 
-    def global_exception(self, request: Request, exc: Exception):
+    async def global_exception(self, request: Request, exc: Exception):
+        request_json = None
+        try:
+            pass  # request_json = await request.json()
+        except json.JSONDecodeError:
+            pass
         logging.error(
             f"Unhandled exception: {exc}",
             exc_info=True,
             extra={
                 "path": request.url.path,
                 "method": request.method,
+                "json": request_json
             }
         )
         return JSONResponse(

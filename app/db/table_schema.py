@@ -25,6 +25,8 @@ class TableSchema:
     current_prefix: str = "_current"
     history_prefix: str = "_history"
 
+    prefix: str = ""  # not used
+
     field_change_count: bool = False
     # change_count:
     # - only in current

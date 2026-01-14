@@ -58,3 +58,5 @@ config/*
 tables/*
 !tables/example/
 !tables/example/*.py
+
+gen/

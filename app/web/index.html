@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>DSM Admin</title>
   <style>
-    :root { --bg:#0b0d10; --card:#12161c; --muted:#7f8a99; --text:#e8edf4; --line:#1f2630; }
+    :root { --bg:#0b0d10; --card:#12161c; --muted:#7f8a99; --text:#e8edf4; --line:#1f2630; --err:#ff5c5c; }
     * { box-sizing:border-box; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
     body { margin:0; background:var(--bg); color:var(--text); }
     header { position:sticky; top:0; background:rgba(11,13,16,.9); backdrop-filter: blur(8px); border-bottom:1px solid var(--line); z-index:5;}
-    .wrap { max-width:1200px; margin:0 auto; padding:10px 12px; }
+    .wrap { max-width:1400px; margin:0 auto; padding:10px 12px; }
     .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; min-width:0; }
     .grow { flex:1; min-width:160px; }
@@ -58,13 +58,13 @@
       -webkit-overflow-scrolling: touch;
       border-radius:14px; border:1px solid var(--line);
     }
-    table { width:100%; border-collapse:collapse; min-width:900px; }
-    th, td { border-bottom:1px solid var(--line); padding:10px; text-align:left; font-size:13px; white-space:nowrap; }
+    table { width:100%; border-collapse:collapse; min-width:900px; table-layout: fixed; }
+    th, td { border-bottom:1px solid var(--line); padding:10px; text-align:left; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     th { position:sticky; top:0; background:#0f1318; z-index:1; color:#b9c6d8; }
     tr:hover td { background:#0f141b; }
     .cellTrunc { max-width:340px; overflow:hidden; text-overflow:ellipsis; }
     .cellClickable { cursor:pointer; }
-    .cellLink { cursor:pointer; text-decoration: underline; text-decoration-style:dotted; } /* только entity_id */
+    .cellLink { cursor:pointer; text-decoration: underline; text-decoration-style:dotted; } /* entity_fields */
 
     .kv { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
     @media (max-width: 720px){ .kv{ grid-template-columns: 1fr; } }
@@ -102,11 +102,99 @@
       font-size:12px;
       color:var(--text);
     }
-    /* растягивать последний input в kv, если стоит класс .odd */
-.kv.odd > input:last-child { grid-column: 1 / -1; }
+
+    /* растягивать последний input в kv, если odd */
+    .kv.odd > input:last-child { grid-column: 1 / -1; }
+
+    /* toast */
+    .toast {
+      position:fixed;
+      top:12px; left:12px; right:12px;
+      max-width:1200px;
+      margin:0 auto;
+      z-index:1000;
+      background:#1b0f12;
+      border:1px solid rgba(255,92,92,.35);
+      color:#ffd3d3;
+      border-radius:14px;
+      padding:10px 12px;
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      box-shadow:0 10px 30px rgba(0,0,0,.35);
+    }
+    .toastTitle{font-weight:900;}
+    .toastMsg{opacity:.95; font-size:13px; line-height:1.3;}
+    .toastClose{width:auto; padding:6px 10px; border-radius:10px; border-color:rgba(255,92,92,.4); background:#230f13;}
+
+    /* select styling (как input) */
+    select {
+      appearance:none; -webkit-appearance:none; -moz-appearance:none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, var(--muted,#7f8a99) 50%),
+        linear-gradient(135deg, var(--muted,#7f8a99) 50%, transparent 50%);
+      background-position:
+        calc(100% - 18px) 52%,
+        calc(100% - 12px) 52%;
+      background-size: 6px 6px, 6px 6px;
+      background-repeat:no-repeat;
+      padding-right:34px;
+    }
+
+    .colGroupBy {
+      background: rgba(120, 160, 255, 0.08);
+    }
+    .tableAuto table { table-layout: auto; }
+
+    /* GROUP BY: квадратный select-кнопка "+" без стрелки */
+    /* GROUP BY: квадратный "+" по центру */
+    /* GROUP BY: реальный квадратный "+" через button + прозрачный select поверх */
+    .gbAddWrap{
+      position: relative;
+      width: 36px;
+      height: 36px;
+      flex: 0 0 auto;
+    }
+
+    .gbAddBtn{
+      width: 36px !important;
+      height: 36px !important;
+      padding: 0 !important;
+      border-radius: 10px !important;
+      font-weight: 900 !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      line-height: 1 !important;
+    }
+
+    /* select невидимый, но кликабельный */
+    .gbAddSelect{
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+
+      /* убираем нативные отступы/стрелки */
+      padding: 0 !important;
+      background: none !important;
+      background-image: none !important;
+      appearance: none !important;
+      -webkit-appearance: none !important;
+      -moz-appearance: none !important;
+    }
+
   </style>
 </head>
 <body>
+
+<div class="toast hidden" id="toast">
+  <div style="flex:1; min-width:0;">
+    <div class="toastTitle" id="toastTitle">Ошибка</div>
+    <div class="toastMsg" id="toastMsg">—</div>
+  </div>
+  <button class="toastClose" id="toastCloseBtn">×</button>
+</div>
 
 <header>
   <div class="wrap row">
@@ -176,7 +264,7 @@
         <div class="secBody hidden" id="querySection">
 
           <button class="small" id="toggleFiltersBtn">Фильтры ▸</button>
-          <div class="" id="filtersSection">
+          <div class="hidden" id="filtersSection">
             <div id="filtersBoxQuery"></div>
           </div>
 
@@ -187,11 +275,21 @@
             <div class="kv">
               <input id="limitInput" placeholder="limit" value="50">
               <input id="offsetInput" placeholder="offset" value="0">
-              <select id="sortSelect">
-                <option value="desc">desc</option>
-                <option value="asc">asc</option>
-              </select>
               <input id="atDateInput" placeholder="at_date">
+            </div>
+
+            <div style="margin-top:10px;">
+              <button class="small" id="toggleFieldsBtn">Поля ▸</button>
+              <div class="hidden" id="fieldsSection">
+                <div id="fieldsBoxQuery"></div>
+              </div>
+            </div>
+
+            <div style="margin-top:10px;">
+              <button class="small" id="toggleSortByBtn">Сортировка ▸</button>
+              <div class="hidden" id="sortBySection">
+                <div id="sortByBoxQuery"></div>
+              </div>
             </div>
           </div>
 
@@ -233,7 +331,7 @@
         <div class="secBody hidden" id="historySection">
 
           <button class="small" id="toggleHistoryFiltersBtn">Фильтры ▸</button>
-          <div class="" id="historyFiltersSection">
+          <div class="hidden" id="historyFiltersSection">
             <div id="filtersBoxHistory"></div>
           </div>
 
@@ -244,12 +342,22 @@
             <div class="kv">
               <input id="historyLimitInput" placeholder="limit" value="100">
               <input id="historyOffsetInput" placeholder="offset" value="0">
-              <select id="historySortSelect">
-                <option value="desc" selected>desc</option>
-                <option value="asc">asc</option>
-              </select>
               <input id="fromDateInput" placeholder="from_date">
               <input id="toDateInput" placeholder="to_date">
+            </div>
+
+            <div style="margin-top:10px;">
+              <button class="small" id="toggleFieldsHistoryBtn">Поля ▸</button>
+              <div class="hidden" id="fieldsHistorySection">
+                <div id="fieldsBoxHistory"></div>
+              </div>
+            </div>
+
+            <div style="margin-top:10px;">
+              <button class="small" id="toggleSortByHistoryBtn">Сортировка ▸</button>
+              <div class="hidden" id="sortByHistorySection">
+                <div id="sortByBoxHistory"></div>
+              </div>
             </div>
           </div>
 
@@ -257,6 +365,81 @@
             <button class="small primary" id="historyBtn">Показать</button>
             <button class="small" id="historyPrevBtn">‹</button>
             <button class="small" id="historyNextBtn">›</button>
+          </div>
+
+        </div>
+      </div>
+
+      <div id="blkGroup">
+        <hr class="divider">
+
+        <div class="secHead clickHead" id="groupHead">
+          <div class="secTitle">Group</div>
+          <button class="small" id="toggleGroupBtn" tabindex="-1">▸</button>
+        </div>
+
+        <div class="secBody hidden" id="groupSection">
+
+          <!-- ✅ GROUP BY + AGGS (первым, открывается автоматически) -->
+          <button class="small" id="toggleGroupGaBtn">GROUP BY & AGGS ▸</button>
+          <div class="" id="groupGaSection">
+
+            <div style="margin-top:10px;">
+              <div class="muted" style="margin-bottom:6px;">GROUP BY</div>
+              <div id="groupByBox"></div>
+            </div>
+
+            <div style="margin-top:10px;">
+              <div class="muted" style="margin-bottom:6px;">AGGS</div>
+              <div id="aggsBox"></div>
+            </div>
+          </div>
+
+          <!-- WHERE filters -->
+          <div style="margin-top:12px;">
+            <button class="small" id="toggleGroupFiltersBtn">Фильтры ▸</button>
+            <div class="hidden" id="groupFiltersSection">
+              <div id="filtersBoxGroup"></div>
+            </div>
+          </div>
+
+          <!-- HAVING -->
+          <div style="margin-top:12px;">
+            <button class="small" id="toggleGroupHavingBtn">Having ▸</button>
+            <div class="hidden" id="groupHavingSection">
+              <div id="havingBoxGroup"></div>
+            </div>
+          </div>
+
+          <!-- ✅ Дополнительно: limit/offset + сортировка -->
+          <button class="small" id="toggleGroupAdvancedBtn" style="margin-top:12px;">
+            Дополнительно ▸
+          </button>
+          <div class="hidden" id="groupAdvancedSection">
+            <div id="groupIsHistoryBox" style="margin-top:10px;"></div>
+            <div class="kv" style="margin-top:10px;">
+              <input id="groupLimitInput" placeholder="limit" value="100">
+              <input id="groupOffsetInput" placeholder="offset" value="0">
+            </div>
+
+            <div style="margin-top:10px;">
+              <button class="small" id="toggleGroupSortByBtn">Сортировка ▸</button>
+              <div class="hidden" id="groupSortBySection">
+                <div id="sortByBoxGroup"></div>
+              </div>
+            </div>
+
+            <!-- старый sort оставим тут на будущее, если нужно — но ты просил по умолчанию только sort_by -->
+            <!-- <div class="kv" style="margin-top:10px;">
+              <input id="groupSortInput" placeholder="sort (legacy)">
+            </div> -->
+          </div>
+
+          <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+            <button class="small primary" id="groupBtn">Показать</button>
+            <button class="small" id="groupPrevBtn">‹</button>
+            <button class="small" id="groupNextBtn">›</button>
+            <button class="small" id="groupPresetsBtn">Сохранённые</button>
           </div>
 
         </div>
