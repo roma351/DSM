@@ -1,45 +1,38 @@
-version: '3.8'
 
 services:
-  postgres:
-    image: postgres:15
-    container_name: dsm_postgres
-    environment:
-      POSTGRES_DB: school_diary_dsm
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  app:
+  dsm-backend:
     build: .
-    container_name: dsm_app
-    ports:
-      - "3239:3239"
-    env_file:
-      - .env
+    env_file: .env
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: school_diary_dsm
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      PYTHONPATH: /code
-    depends_on:
-      postgres:
-        condition: service_healthy
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      PYTHONPATH: /app
     restart: on-failure
-    command: >
-      sh -c "sleep 5 && python -m app.main"
-    volumes:
-      - ./app:/code/app
+#   command: >
+#      sh -c "python -m app.main"
+    networks:
+      - shared
+
+  
+#  postgres:
+#    image: postgres:16
+#    restart: unless-stopped
+#    profiles: ["standalone"]
+#    environment:
+#      POSTGRES_PASSWORD: ${DB_PASSWORD}
+#    volumes:
+#      - pgdata:/var/lib/postgresql/data
+#    networks:
+#      - shared
+
+
+networks:
+  shared:
+    external: true
+    name: shared_net
 
 volumes:
-  postgres_data:
+  pgdata:

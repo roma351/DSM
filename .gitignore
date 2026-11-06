@@ -59,4 +59,11 @@ tables/*
 !tables/example/
 !tables/example/*.py
 
+/nginx/*
+!/nginx/
+!/nginx/dsm.example.com.conf
+
 gen/
+
+todo2.md
+
